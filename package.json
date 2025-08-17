@@ -22,7 +22,8 @@
     "multer": "^2.0.2",
     "mysql2": "^3.14.2",
     "puppeteer": "^24.15.0",
-    "sequelize": "^6.37.7"
+    "sequelize": "^6.37.7",
+    "zod": "^4.0.17"
   },
   "devDependencies": {
     "colors": "^1.4.0",
