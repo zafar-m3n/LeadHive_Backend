@@ -7,7 +7,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
 const validateMiddleware = require("../middlewares/validateMiddleware");
 
-const { updateProfileSchema, toggleActiveSchema, updatePasswordSchema } = require("../schemas/userSchema");
+const { updateProfileSchema, toggleActiveSchema, updatePasswordSchema } = require("../schemas/userSchemas");
 
 // ==============================
 // User Routes
