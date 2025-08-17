@@ -1,6 +1,3 @@
-// Role-based access control middleware
-// Usage: router.get("/admin", authMiddleware, roleMiddleware(["admin"]), controllerFn);
-
 const roleMiddleware = (allowedRoles = []) => {
   return (req, res, next) => {
     if (!req.user || !req.user.role) {

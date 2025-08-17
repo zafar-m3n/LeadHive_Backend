@@ -31,17 +31,9 @@ app.use("/uploads", express.static("uploads"));
 
 // ✅ Routes
 const authRoutes = require("./routes/authRoutes");
-const userRoutes = require("./routes/userRoutes");
-const leadRoutes = require("./routes/leadRoutes");
-const leadStatusRoutes = require("./routes/leadStatusRoutes");
-const leadSourceRoutes = require("./routes/leadSourceRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
-app.use("/api/v1/users", userRoutes);
-app.use("/api/v1/leads", leadRoutes);
-app.use("/api/v1/lead/status", leadStatusRoutes);
-app.use("/api/v1/lead/source", leadSourceRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {
