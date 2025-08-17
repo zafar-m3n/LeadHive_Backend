@@ -1,5 +1,76 @@
+const Role = require("./Role");
+const LeadStatus = require("./LeadStatus");
+const LeadSource = require("./LeadSource");
 const User = require("./User");
+const Team = require("./Team");
+const TeamMember = require("./TeamMember");
+const Lead = require("./Lead");
+const LeadAssignment = require("./LeadAssignment");
+const SavedFilter = require("./SavedFilter");
 
+// =============================
+// Associations
+// =============================
+
+// --- Roles & Users ---
+Role.hasMany(User, { foreignKey: "role_id" });
+User.belongsTo(Role, { foreignKey: "role_id" });
+
+// --- Teams & Users ---
+User.hasMany(Team, { foreignKey: "manager_id" });
+Team.belongsTo(User, { as: "manager", foreignKey: "manager_id" });
+
+// --- Team Members (many-to-many between Teams and Users) ---
+Team.belongsToMany(User, {
+  through: TeamMember,
+  foreignKey: "team_id",
+  otherKey: "user_id",
+});
+User.belongsToMany(Team, {
+  through: TeamMember,
+  foreignKey: "user_id",
+  otherKey: "team_id",
+});
+
+// --- Leads with Statuses & Sources ---
+Lead.belongsTo(LeadStatus, { foreignKey: "status_id" });
+LeadStatus.hasMany(Lead, { foreignKey: "status_id" });
+
+Lead.belongsTo(LeadSource, { foreignKey: "source_id" });
+LeadSource.hasMany(Lead, { foreignKey: "source_id" });
+
+// --- Leads created/updated by Users ---
+User.hasMany(Lead, { foreignKey: "created_by", as: "createdLeads" });
+Lead.belongsTo(User, { foreignKey: "created_by", as: "creator" });
+
+User.hasMany(Lead, { foreignKey: "updated_by", as: "updatedLeads" });
+Lead.belongsTo(User, { foreignKey: "updated_by", as: "updater" });
+
+// --- Lead Assignments ---
+Lead.hasMany(LeadAssignment, { foreignKey: "lead_id" });
+LeadAssignment.belongsTo(Lead, { foreignKey: "lead_id" });
+
+User.hasMany(LeadAssignment, { foreignKey: "assignee_id", as: "assignedLeads" });
+LeadAssignment.belongsTo(User, { foreignKey: "assignee_id", as: "assignee" });
+
+User.hasMany(LeadAssignment, { foreignKey: "assigned_by", as: "assignmentsMade" });
+LeadAssignment.belongsTo(User, { foreignKey: "assigned_by", as: "assigner" });
+
+// --- Saved Filters ---
+User.hasMany(SavedFilter, { foreignKey: "user_id" });
+SavedFilter.belongsTo(User, { foreignKey: "user_id" });
+
+// =============================
+// Export all models
+// =============================
 module.exports = {
+  Role,
+  LeadStatus,
+  LeadSource,
   User,
+  Team,
+  TeamMember,
+  Lead,
+  LeadAssignment,
+  SavedFilter,
 };
