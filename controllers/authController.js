@@ -1,6 +1,5 @@
-// controllers/authController.js
 const jwt = require("jsonwebtoken");
-const bcrypt = require("bcrypt"); // ✅ using native bcrypt
+const bcrypt = require("bcrypt"); 
 const User = require("../models/User");
 const Role = require("../models/Role");
 const { resSuccess, resError } = require("../utils/responseUtil");
@@ -10,7 +9,7 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 // ==============================
 const generateToken = (user) => {
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.Role.value }, // role from Role association
+    { id: user.id, email: user.email, role: user.Role.value },
     process.env.NODE_LEADHIVE_JWT_SECRET,
     { expiresIn: "7d" }
   );
