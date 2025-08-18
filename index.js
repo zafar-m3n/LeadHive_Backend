@@ -36,6 +36,7 @@ const teamRoutes = require("./routes/teamRoutes");
 const leadRoutes = require("./routes/leadRoutes");
 const savedFilterRoutes = require("./routes/savedFilterRoutes");
 const supportingRoutes = require("./routes/supportingRoutes");
+const leadsUploadRoutes = require("./routes/leadsUploadRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
@@ -44,6 +45,7 @@ app.use("api/v1/teams", teamRoutes);
 app.use("api/v1/leads", leadRoutes);
 app.use("api/v1/filters", savedFilterRoutes);
 app.use("api/v1/supports", supportingRoutes);
+app.use("api/v1/leads/upload", leadsUploadRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {
