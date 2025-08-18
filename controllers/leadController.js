@@ -36,50 +36,77 @@ const createLead = async (req, res) => {
 };
 
 /**
- * Get leads by role
+ * Get leads by role with optional filters, pagination, and search
  * - Admin: all leads
  * - Manager: leads assigned to them OR their team members
  * - Sales Rep: only their leads
+ * Query params:
+ *   status_id, source_id, orderBy, orderDir, search, page, limit
  */
 const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
+    const { status_id, source_id, orderBy, orderDir, search, page = 1, limit = 10 } = req.query;
 
     let whereClause = {};
 
+    // --------------------------
+    // Role-based restrictions
+    // --------------------------
     if (role === "manager") {
-      // Find teams managed by this manager
       const teams = await Team.findAll({ where: { manager_id: userId } });
       const teamIds = teams.map((t) => t.id);
 
-      // Get team members (including the manager themselves)
       const teamMembers = await TeamMember.findAll({
         where: { team_id: { [Op.in]: teamIds } },
       });
       const teamUserIds = teamMembers.map((tm) => tm.user_id).concat(userId);
 
-      // Restrict to leads assigned to team members
       const assignments = await LeadAssignment.findAll({
         where: { assignee_id: { [Op.in]: teamUserIds } },
       });
       const leadIds = assignments.map((a) => a.lead_id);
 
-      whereClause = { id: { [Op.in]: leadIds } };
+      whereClause.id = { [Op.in]: leadIds };
     }
 
     if (role === "sales_rep") {
-      // Only leads assigned directly to this user
       const assignments = await LeadAssignment.findAll({
         where: { assignee_id: userId },
       });
       const leadIds = assignments.map((a) => a.lead_id);
 
-      whereClause = { id: { [Op.in]: leadIds } };
+      whereClause.id = { [Op.in]: leadIds };
     }
 
-    // Admin sees all (no whereClause)
+    // --------------------------
+    // Filters
+    // --------------------------
+    if (status_id) whereClause.status_id = status_id;
+    if (source_id) whereClause.source_id = source_id;
 
-    const leads = await Lead.findAll({
+    // --------------------------
+    // Search (by name/email)
+    // --------------------------
+    if (search) {
+      whereClause[Op.or] = [{ name: { [Op.iLike]: `%${search}%` } }, { email: { [Op.iLike]: `%${search}%` } }];
+    }
+
+    // --------------------------
+    // Ordering
+    // --------------------------
+    let order = [["id", "ASC"]]; // default
+    if (orderBy) {
+      const direction = orderDir && orderDir.toUpperCase() === "DESC" ? "DESC" : "ASC";
+      order = [[orderBy, direction]];
+    }
+
+    // --------------------------
+    // Pagination
+    // --------------------------
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const { count, rows: leads } = await Lead.findAndCountAll({
       where: whereClause,
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
@@ -87,10 +114,20 @@ const getLeads = async (req, res) => {
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
       ],
-      order: [["id", "ASC"]],
+      order,
+      limit: parseInt(limit),
+      offset,
     });
 
-    return resSuccess(res, leads);
+    return resSuccess(res, {
+      leads,
+      pagination: {
+        total: count,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(count / limit),
+      },
+    });
   } catch (err) {
     console.error("GetLeads Error:", err);
     return resError(res, "Internal server error", 500);
