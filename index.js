@@ -41,13 +41,13 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
-app.use("api/v1/users", userRoutes);
-app.use("api/v1/teams", teamRoutes);
-app.use("api/v1/leads", leadRoutes);
-app.use("api/v1/filters", savedFilterRoutes);
-app.use("api/v1/supports", supportingRoutes);
-app.use("api/v1/leads/upload", leadsUploadRoutes);
-app.use("api/v1/dashboard", dashboardRoutes);
+app.use("/api/v1/users", userRoutes);
+app.use("/api/v1/teams", teamRoutes);
+app.use("/api/v1/leads", leadRoutes);
+app.use("/api/v1/filters", savedFilterRoutes);
+app.use("/api/v1/supports", supportingRoutes);
+app.use("/api/v1/leads/upload", leadsUploadRoutes);
+app.use("/api/v1/dashboard", dashboardRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {

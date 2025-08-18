@@ -27,6 +27,15 @@ const generateToken = (user) => {
 const sanitizeUser = (user) => {
   const plain = user.toJSON();
   delete plain.password_hash;
+
+  if (user.Role) {
+    plain.role = {
+      value: user.Role.value,
+      label: user.Role.label,
+    };
+    delete plain.Role;
+  }
+
   return plain;
 };
 

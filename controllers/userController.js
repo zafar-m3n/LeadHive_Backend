@@ -54,17 +54,40 @@ const createUser = async (req, res) => {
 };
 
 /**
- * Get all users (admin only)
+ * Get all users (admin only) with pagination
+ * Query params: ?page=1&limit=10
  */
 const getUsers = async (req, res) => {
   try {
-    const users = await User.findAll({
+    let { page = 1, limit = 10 } = req.query;
+
+    page = parseInt(page, 10);
+    limit = parseInt(limit, 10);
+
+    if (isNaN(page) || page < 1) page = 1;
+    if (isNaN(limit) || limit < 1) limit = 10;
+
+    const offset = (page - 1) * limit;
+
+    const { rows, count } = await User.findAndCountAll({
+      where: { is_active: true },
       include: [{ model: Role, attributes: ["id", "value", "label"] }],
       order: [["id", "ASC"]],
+      offset,
+      limit,
     });
 
-    const safe = users.map(sanitizeUser);
-    return resSuccess(res, safe);
+    const safe = rows.map(sanitizeUser);
+
+    return resSuccess(res, {
+      users: safe,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
+    });
   } catch (err) {
     console.error("GetUsers Error:", err);
     return resError(res, "Internal server error", 500);
