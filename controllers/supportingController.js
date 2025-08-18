@@ -1,4 +1,5 @@
 const { Role, LeadStatus, LeadSource, User, Team, TeamMember } = require("../models");
+const { resSuccess, resError } = require("../utils/responseUtil");
 
 // ==============================
 // Supporting Controller
@@ -8,10 +9,10 @@ const { Role, LeadStatus, LeadSource, User, Team, TeamMember } = require("../mod
 const getLeadStatuses = async (req, res) => {
   try {
     const statuses = await LeadStatus.findAll({ order: [["id", "ASC"]] });
-    return res.json({ success: true, data: statuses });
+    return resSuccess(res, statuses);
   } catch (err) {
     console.error("Error fetching lead statuses:", err);
-    return res.status(500).json({ success: false, error: "Server error fetching lead statuses." });
+    return resError(res, "Server error fetching lead statuses.");
   }
 };
 
@@ -19,10 +20,10 @@ const getLeadStatuses = async (req, res) => {
 const getLeadSources = async (req, res) => {
   try {
     const sources = await LeadSource.findAll({ order: [["id", "ASC"]] });
-    return res.json({ success: true, data: sources });
+    return resSuccess(res, sources);
   } catch (err) {
     console.error("Error fetching lead sources:", err);
-    return res.status(500).json({ success: false, error: "Server error fetching lead sources." });
+    return resError(res, "Server error fetching lead sources.");
   }
 };
 
@@ -30,10 +31,10 @@ const getLeadSources = async (req, res) => {
 const getRoles = async (req, res) => {
   try {
     const roles = await Role.findAll({ order: [["id", "ASC"]] });
-    return res.json({ success: true, data: roles });
+    return resSuccess(res, roles);
   } catch (err) {
     console.error("Error fetching roles:", err);
-    return res.status(500).json({ success: false, error: "Server error fetching roles." });
+    return resError(res, "Server error fetching roles.");
   }
 };
 
@@ -50,10 +51,10 @@ const getManagers = async (req, res) => {
       ],
       attributes: ["id", "full_name", "email"],
     });
-    return res.json({ success: true, data: managers });
+    return resSuccess(res, managers);
   } catch (err) {
     console.error("Error fetching managers:", err);
-    return res.status(500).json({ success: false, error: "Server error fetching managers." });
+    return resError(res, "Server error fetching managers.");
   }
 };
 
@@ -73,13 +74,43 @@ const getTeamMembers = async (req, res) => {
     });
 
     if (!team) {
-      return res.status(404).json({ success: false, error: "Team not found." });
+      return resError(res, "Team not found.", 404);
     }
 
-    return res.json({ success: true, data: team.Users });
+    return resSuccess(res, team.Users);
   } catch (err) {
     console.error("Error fetching team members:", err);
-    return res.status(500).json({ success: false, error: "Server error fetching team members." });
+    return resError(res, "Server error fetching team members.");
+  }
+};
+
+// ✅ Get unassigned active sales reps
+const getUnassignedSalesReps = async (req, res) => {
+  try {
+    // 1. Find all active users with role = 'salesrep'
+    const salesReps = await User.findAll({
+      where: { is_active: true },
+      include: [
+        {
+          model: Role,
+          where: { value: "sales_rep" },
+          attributes: [],
+        },
+      ],
+      attributes: ["id", "full_name", "email"],
+    });
+
+    // 2. Get all assigned user IDs from TeamMembers
+    const assignedMembers = await TeamMember.findAll({ attributes: ["user_id"] });
+    const assignedIds = assignedMembers.map((m) => m.user_id);
+
+    // 3. Filter out assigned reps
+    const unassignedReps = salesReps.filter((rep) => !assignedIds.includes(rep.id));
+
+    return resSuccess(res, unassignedReps);
+  } catch (err) {
+    console.error("Error fetching unassigned sales reps:", err);
+    return resError(res, "Server error fetching unassigned sales reps.");
   }
 };
 
@@ -92,4 +123,5 @@ module.exports = {
   getRoles,
   getManagers,
   getTeamMembers,
+  getUnassignedSalesReps,
 };
