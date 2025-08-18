@@ -1,4 +1,3 @@
-// routes/teamRoutes.js
 const express = require("express");
 const router = express.Router();
 
@@ -15,6 +14,10 @@ const {
 const authMiddleware = require("../middlewares/authMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
 
+// ==============================
+// Team Routes
+// ==============================
+
 // All routes require authentication
 router.use(authMiddleware);
 
@@ -23,18 +26,32 @@ router.use(authMiddleware);
  * Admin-only routes
  * =============================
  */
-router.post("/", roleMiddleware(["admin"]), createTeam); // Create team
-router.put("/:id", roleMiddleware(["admin"]), updateTeam); // Update team
-router.delete("/:id", roleMiddleware(["admin"]), deleteTeam); // Delete team
-router.post("/:id/members", roleMiddleware(["admin"]), addMemberToTeam); // Add member
+
+// ✅ Create a new team (with optional members)
+router.post("/", roleMiddleware(["admin"]), createTeam);
+
+// ✅ Update team details (name, manager, members)
+router.put("/:id", roleMiddleware(["admin"]), updateTeam);
+
+// ✅ Delete a team (removes members first, then team)
+router.delete("/:id", roleMiddleware(["admin"]), deleteTeam);
+
+// ✅ Add a member to team
+router.post("/:id/members", roleMiddleware(["admin"]), addMemberToTeam);
 
 /**
  * =============================
  * Admin & Manager routes
  * =============================
  */
-router.get("/", roleMiddleware(["admin", "manager"]), getTeams); // Get all teams (admins) or only manager's team (filter in controller if needed)
-router.get("/:id", roleMiddleware(["admin", "manager"]), getTeamById); // Get team by ID
-router.delete("/:id/members/:userId", roleMiddleware(["admin", "manager"]), removeMemberFromTeam); // Remove member
+
+// ✅ Get all teams (paginated)
+router.get("/", roleMiddleware(["admin", "manager"]), getTeams);
+
+// ✅ Get team by ID
+router.get("/:id", roleMiddleware(["admin", "manager"]), getTeamById);
+
+// ✅ Remove a member from a team
+router.delete("/:id/members/:userId", roleMiddleware(["admin", "manager"]), removeMemberFromTeam);
 
 module.exports = router;

@@ -1,14 +1,14 @@
-// controllers/teamController.js
 const { Team, TeamMember, User } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
+const { Op } = require("sequelize");
 
 /**
- * Create a new team
- * Body: { name, manager_id }
+ * Create a new team (with members)
+ * Body: { name, manager_id, members: [user_ids] }
  */
 const createTeam = async (req, res) => {
   try {
-    const { name, manager_id } = req.body;
+    const { name, manager_id, members = [] } = req.body;
 
     if (!name || !manager_id) {
       return resError(res, "Team name and manager_id are required", 400);
@@ -20,7 +20,30 @@ const createTeam = async (req, res) => {
 
     const team = await Team.create({ name, manager_id });
 
-    return resSuccess(res, team, 201);
+    // Add members if provided
+    if (Array.isArray(members) && members.length > 0) {
+      const validUsers = await User.findAll({
+        where: { id: { [Op.in]: members }, is_active: true },
+        attributes: ["id"],
+      });
+
+      const bulkMembers = validUsers.map((u) => ({
+        team_id: team.id,
+        user_id: u.id,
+      }));
+
+      await TeamMember.bulkCreate(bulkMembers);
+    }
+
+    // Fetch created team with relations
+    const created = await Team.findByPk(team.id, {
+      include: [
+        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
+        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
+      ],
+    });
+
+    return resSuccess(res, created, 201);
   } catch (err) {
     console.error("CreateTeam Error:", err);
     return resError(res, "Internal server error", 500);
@@ -28,23 +51,33 @@ const createTeam = async (req, res) => {
 };
 
 /**
- * Get all teams with manager and members
+ * Get all teams with manager and members + pagination
+ * Query params: ?page=1&limit=10
  */
 const getTeams = async (req, res) => {
   try {
-    const teams = await Team.findAll({
+    let { page = 1, limit = 10 } = req.query;
+    page = parseInt(page);
+    limit = parseInt(limit);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await Team.findAndCountAll({
       include: [
         { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        {
-          model: User,
-          through: { attributes: [] }, // hides pivot table
-          attributes: ["id", "full_name", "email"],
-        },
+        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
       ],
       order: [["id", "ASC"]],
+      offset,
+      limit,
     });
 
-    return resSuccess(res, teams);
+    return resSuccess(res, {
+      total: count,
+      page,
+      limit,
+      pages: Math.ceil(count / limit),
+      teams: rows,
+    });
   } catch (err) {
     console.error("GetTeams Error:", err);
     return resError(res, "Internal server error", 500);
@@ -61,11 +94,7 @@ const getTeamById = async (req, res) => {
     const team = await Team.findByPk(id, {
       include: [
         { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        {
-          model: User,
-          through: { attributes: [] },
-          attributes: ["id", "full_name", "email"],
-        },
+        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
       ],
     });
 
@@ -79,12 +108,13 @@ const getTeamById = async (req, res) => {
 };
 
 /**
- * Update team (name or manager)
+ * Update team (name, manager, members)
+ * Body: { name?, manager_id?, members?: [user_ids] }
  */
 const updateTeam = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, manager_id } = req.body;
+    const { name, manager_id, members } = req.body;
 
     const team = await Team.findByPk(id);
     if (!team) return resError(res, "Team not found", 404);
@@ -95,17 +125,32 @@ const updateTeam = async (req, res) => {
       if (!manager) return resError(res, "Manager not found", 404);
       team.manager_id = manager_id;
     }
-
     await team.save();
+
+    // Handle members update (replace)
+    if (Array.isArray(members)) {
+      // Remove existing
+      await TeamMember.destroy({ where: { team_id: id } });
+
+      if (members.length > 0) {
+        const validUsers = await User.findAll({
+          where: { id: { [Op.in]: members }, is_active: true },
+          attributes: ["id"],
+        });
+
+        const bulkMembers = validUsers.map((u) => ({
+          team_id: id,
+          user_id: u.id,
+        }));
+
+        await TeamMember.bulkCreate(bulkMembers);
+      }
+    }
 
     const updated = await Team.findByPk(id, {
       include: [
         { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        {
-          model: User,
-          through: { attributes: [] },
-          attributes: ["id", "full_name", "email"],
-        },
+        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
       ],
     });
 
@@ -117,7 +162,7 @@ const updateTeam = async (req, res) => {
 };
 
 /**
- * Delete team (removes members too via cascade)
+ * Delete team (remove members first, then team)
  */
 const deleteTeam = async (req, res) => {
   try {
@@ -126,6 +171,7 @@ const deleteTeam = async (req, res) => {
     const team = await Team.findByPk(id);
     if (!team) return resError(res, "Team not found", 404);
 
+    await TeamMember.destroy({ where: { team_id: id } });
     await team.destroy();
 
     return resSuccess(res, { message: "Team deleted successfully" });
@@ -137,7 +183,6 @@ const deleteTeam = async (req, res) => {
 
 /**
  * Add a member to team
- * Body: { user_id }
  */
 const addMemberToTeam = async (req, res) => {
   try {
@@ -150,7 +195,6 @@ const addMemberToTeam = async (req, res) => {
     const user = await User.findByPk(user_id);
     if (!user) return resError(res, "User not found", 404);
 
-    // Check if already member
     const exists = await TeamMember.findOne({ where: { team_id: id, user_id } });
     if (exists) return resError(res, "User already in team", 400);
 
