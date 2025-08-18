@@ -1,134 +1,155 @@
+// controllers/authController.js
+const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const bcrypt = require("bcrypt"); 
-const User = require("../models/User");
-const Role = require("../models/Role");
+require("dotenv").config();
+
+const { User, Role } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
-// ==============================
-// Helper: Generate JWT Token
-// ==============================
+const BCRYPT_ROUNDS = parseInt(process.env.NODE_LEADHIVE_BCRYPT_SALT_ROUNDS || "10", 10);
+const JWT_SECRET = process.env.NODE_LEADHIVE_JWT_SECRET;
+
+// =============================
+// Helpers
+// =============================
 const generateToken = (user) => {
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.Role.value },
-    process.env.NODE_LEADHIVE_JWT_SECRET,
-    { expiresIn: "7d" }
+    {
+      id: user.id,
+      email: user.email,
+      role: user.Role ? user.Role.value : null,
+    },
+    JWT_SECRET,
+    { expiresIn: "1d" } // 1 day only
   );
 };
 
-// ==============================
-// @desc   Register User
-// @route  POST /api/v1/auth/register
-// ==============================
+const sanitizeUser = (user) => {
+  const plain = user.toJSON();
+  delete plain.password_hash;
+  return plain;
+};
+
+// =============================
+// Controllers
+// =============================
+
+/**
+ * Register new user
+ * Body: { full_name, email, password, role_id, phone?, avatar_url? }
+ * -> Creates account, DOES NOT auto-login
+ */
 const register = async (req, res) => {
   try {
-    const { full_name, email, password, phone, avatar_url } = req.validatedData;
+    const { full_name, email, password, role_id, phone, avatar_url } = req.body;
 
-    // check if user exists
-    const existingUser = await User.findOne({ where: { email } });
-    if (existingUser) return resError(res, "User already exists", 400);
+    if (!full_name || !email || !password || !role_id) {
+      return resError(res, "Missing required fields", 400);
+    }
 
-    // hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    const existing = await User.findOne({ where: { email } });
+    if (existing) return resError(res, "Email already in use", 400);
 
-    // assign default role = sales_rep
-    const defaultRole = await Role.findOne({ where: { value: "sales_rep" } });
-    if (!defaultRole) return resError(res, "Default role not found", 500);
+    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-    const newUser = await User.create({
+    const user = await User.create({
       full_name,
       email,
-      password_hash: hashedPassword,
-      phone,
-      avatar_url,
-      role_id: defaultRole.id,
+      password_hash,
+      role_id,
+      phone: phone || null,
+      avatar_url: avatar_url || null,
     });
 
-    return resSuccess(
-      res,
-      {
-        token: generateToken({ ...newUser.dataValues, Role: defaultRole }),
-        user: {
-          id: newUser.id,
-          full_name: newUser.full_name,
-          email: newUser.email,
-          phone: newUser.phone,
-          avatar_url: newUser.avatar_url,
-          role: defaultRole.value,
-        },
-      },
-      201
-    );
+    return resSuccess(res, { message: "User registered successfully. Please log in." }, 201);
   } catch (err) {
     console.error("Register Error:", err);
-    return resError(res, "Server error during registration");
+    return resError(res, "Internal server error", 500);
   }
 };
 
-// ==============================
-// @desc   Login User
-// @route  POST /api/v1/auth/login
-// ==============================
+/**
+ * Login user
+ * Body: { email, password }
+ * -> Generates JWT valid for 1 day
+ */
 const login = async (req, res) => {
   try {
-    const { email, password } = req.validatedData;
+    const { email, password } = req.body;
+    if (!email || !password) return resError(res, "Missing email or password", 400);
 
     const user = await User.findOne({
       where: { email },
       include: [{ model: Role, attributes: ["id", "value", "label"] }],
     });
-
     if (!user) return resError(res, "Invalid credentials", 401);
+    if (!user.is_active) return resError(res, "Account is deactivated", 403);
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) return resError(res, "Invalid credentials", 401);
 
-    return resSuccess(res, {
-      token: generateToken(user),
-      user: {
-        id: user.id,
-        full_name: user.full_name,
-        email: user.email,
-        phone: user.phone,
-        avatar_url: user.avatar_url,
-        role: user.Role.value,
-      },
-    });
+    const token = generateToken(user);
+
+    return resSuccess(res, { user: sanitizeUser(user), token });
   } catch (err) {
     console.error("Login Error:", err);
-    return resError(res, "Server error during login");
+    return resError(res, "Internal server error", 500);
   }
 };
 
-// ==============================
-// @desc   Change Password
-// @route  POST /api/v1/auth/change-password
-// ==============================
-const changePassword = async (req, res) => {
+/**
+ * Get current user's profile
+ * Auth: Bearer token
+ */
+const getProfile = async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.validatedData;
+    const user = await User.findByPk(req.user.id, {
+      include: [{ model: Role, attributes: ["id", "value", "label"] }],
+    });
+
+    if (!user) return resError(res, "User not found", 404);
+
+    return resSuccess(res, sanitizeUser(user));
+  } catch (err) {
+    console.error("GetProfile Error:", err);
+    return resError(res, "Internal server error", 500);
+  }
+};
+
+/**
+ * Update password
+ * Body: { current_password, new_password }
+ */
+const updatePassword = async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body;
+    if (!current_password || !new_password) {
+      return resError(res, "Both current_password and new_password are required", 400);
+    }
 
     const user = await User.findByPk(req.user.id);
     if (!user) return resError(res, "User not found", 404);
 
-    const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!isMatch) return resError(res, "Current password is incorrect", 400);
+    const isMatch = await bcrypt.compare(current_password, user.password_hash);
+    if (!isMatch) return resError(res, "Current password is incorrect", 401);
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-    user.password_hash = hashedPassword;
+    const newHash = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
+    user.password_hash = newHash;
     await user.save();
 
     return resSuccess(res, { message: "Password updated successfully" });
   } catch (err) {
-    console.error("Change Password Error:", err);
-    return resError(res, "Server error during password change");
+    console.error("UpdatePassword Error:", err);
+    return resError(res, "Internal server error", 500);
   }
 };
 
+// =============================
+// Exports
+// =============================
 module.exports = {
   register,
   login,
-  changePassword,
+  getProfile,
+  updatePassword,
 };
