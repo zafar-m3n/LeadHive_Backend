@@ -15,6 +15,6 @@ router.post("/login", login);
 // Protected routes
 // =============================
 router.get("/profile", authMiddleware, getProfile);
-router.patch("/update-password", authMiddleware, updatePassword);
+router.patch("/password/update", authMiddleware, updatePassword);
 
 module.exports = router;
