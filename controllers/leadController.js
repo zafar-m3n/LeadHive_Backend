@@ -14,6 +14,7 @@ const createLead = async (req, res) => {
 
     if (!status_id) return resError(res, "status_id is required", 400);
 
+    // Step 1: Create the lead
     const lead = await Lead.create({
       first_name,
       last_name,
@@ -28,6 +29,13 @@ const createLead = async (req, res) => {
       created_by: req.user.id,
     });
 
+    // Step 2: Create initial assignment to the creator
+    await LeadAssignment.create({
+      lead_id: lead.id,
+      assignee_id: req.user.id,
+      assigned_by: req.user.id,
+    });
+
     return resSuccess(res, lead, 201);
   } catch (err) {
     console.error("CreateLead Error:", err);
@@ -37,11 +45,6 @@ const createLead = async (req, res) => {
 
 /**
  * Get leads by role with optional filters, pagination, and search
- * - Admin: all leads
- * - Manager: leads assigned to them OR their team members
- * - Sales Rep: only their leads
- * Query params:
- *   status_id, source_id, orderBy, orderDir, search, page, limit
  */
 const getLeads = async (req, res) => {
   try {
@@ -89,7 +92,11 @@ const getLeads = async (req, res) => {
     // Search (by name/email)
     // --------------------------
     if (search) {
-      whereClause[Op.or] = [{ name: { [Op.iLike]: `%${search}%` } }, { email: { [Op.iLike]: `%${search}%` } }];
+      whereClause[Op.or] = [
+        { first_name: { [Op.like]: `%${search}%` } },
+        { last_name: { [Op.like]: `%${search}%` } },
+        { email: { [Op.like]: `%${search}%` } },
+      ];
     }
 
     // --------------------------
@@ -113,6 +120,18 @@ const getLeads = async (req, res) => {
         { model: LeadSource, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
+        {
+          model: LeadAssignment,
+          include: [
+            {
+              model: User,
+              as: "assignee",
+              attributes: ["id", "full_name", "email"],
+            },
+          ],
+          limit: 1,
+          order: [["assigned_at", "DESC"]],
+        },
       ],
       order,
       limit: parseInt(limit),
@@ -135,7 +154,7 @@ const getLeads = async (req, res) => {
 };
 
 /**
- * Get single lead by ID
+ * Get single lead by ID (with current assignee)
  */
 const getLeadById = async (req, res) => {
   try {
@@ -147,6 +166,18 @@ const getLeadById = async (req, res) => {
         { model: LeadSource, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
+        {
+          model: LeadAssignment,
+          include: [
+            {
+              model: User,
+              as: "assignee",
+              attributes: ["id", "full_name", "email"],
+            },
+          ],
+          limit: 1,
+          order: [["assigned_at", "DESC"]],
+        },
       ],
     });
 
