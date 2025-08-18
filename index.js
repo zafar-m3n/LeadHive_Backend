@@ -31,9 +31,11 @@ app.use("/uploads", express.static("uploads"));
 
 // ✅ Routes
 const authRoutes = require("./routes/authRoutes");
+const userRoutes = require("./routes/userRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
+app.use("api/v1/users", userRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {
