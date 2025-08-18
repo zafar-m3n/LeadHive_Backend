@@ -6,6 +6,7 @@ const {
   getManagers,
   getTeamMembers,
   getUnassignedSalesReps,
+  getManagersAndAdmins,
 } = require("../controllers/supportingController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -29,15 +30,13 @@ router.get("/leads/sources", authMiddleware, roleMiddleware(["admin", "manager",
 // ✅ Get all managers (Admin only)
 router.get("/users/managers", authMiddleware, roleMiddleware(["admin"]), getManagers);
 
+// ✅ Get all managers & admins (Admin only)
+router.get("/users/managers-admins", authMiddleware, roleMiddleware(["admin"]), getManagersAndAdmins);
+
 // ✅ Get team members by teamId (Admin and Manager only)
 router.get("/teams/:teamId/members", authMiddleware, roleMiddleware(["admin", "manager"]), getTeamMembers);
 
 // ✅ Get unassigned active sales reps (Admin and Manager only)
-router.get(
-  "/users/sales/unassigned",
-  authMiddleware,
-  roleMiddleware(["admin", "manager"]),
-  getUnassignedSalesReps
-);
+router.get("/users/sales/unassigned", authMiddleware, roleMiddleware(["admin", "manager"]), getUnassignedSalesReps);
 
 module.exports = router;

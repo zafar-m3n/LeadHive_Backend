@@ -42,6 +42,7 @@ const getRoles = async (req, res) => {
 const getManagers = async (req, res) => {
   try {
     const managers = await User.findAll({
+      where: { is_active: true },
       include: [
         {
           model: Role,
@@ -55,6 +56,27 @@ const getManagers = async (req, res) => {
   } catch (err) {
     console.error("Error fetching managers:", err);
     return resError(res, "Server error fetching managers.");
+  }
+};
+
+// ✅ Get all managers & admins (for assigning leads)
+const getManagersAndAdmins = async (req, res) => {
+  try {
+    const users = await User.findAll({
+      where: { is_active: true },
+      include: [
+        {
+          model: Role,
+          where: { value: ["manager", "admin"] }, // both roles
+          attributes: [],
+        },
+      ],
+      attributes: ["id", "full_name", "email"],
+    });
+    return resSuccess(res, users);
+  } catch (err) {
+    console.error("Error fetching managers & admins:", err);
+    return resError(res, "Server error fetching managers & admins.");
   }
 };
 
@@ -122,6 +144,7 @@ module.exports = {
   getLeadSources,
   getRoles,
   getManagers,
+  getManagersAndAdmins,
   getTeamMembers,
   getUnassignedSalesReps,
 };
