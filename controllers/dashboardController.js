@@ -199,18 +199,113 @@ const getAdminSummary = async (req, res) => {
 
 /**
  * GET /api/v1/dashboard/summary/manager?recentLimit=5
+ * Returns: { self_leads, team_leads, leads_by_member, recent_team_leads }
+ * NOTE: leads_by_member includes ALL team members (zero-filled).
  */
 const getManagerSummary = async (req, res) => {
   try {
     const recentLimit = Number(req.query.recentLimit) > 0 ? Number(req.query.recentLimit) : 10;
-    const assigneeIds = await resolveManagerAssignees(req.user.id);
+    const manager_id = req.user.id;
 
-    const data = await buildSummary({
-      assigneeIds,
-      recentLimit,
-      includeAdminKPIs: false,
+    // Resolve manager scope (self + team members)
+    const assignee_ids = await resolveManagerAssignees(manager_id);
+
+    // Subquery: lead_ids whose LATEST assignment belongs to assignee_ids
+    const inScopeLeadIds = (() => {
+      if (!assignee_ids?.length) return literal("(SELECT 0)");
+      const ids = assignee_ids.join(",");
+      return literal(`
+        (
+          SELECT la.lead_id
+          FROM lead_assignments la
+          INNER JOIN (
+            SELECT lead_id, MAX(id) AS max_id
+            FROM lead_assignments
+            GROUP BY lead_id
+          ) t ON t.max_id = la.id
+          WHERE la.assignee_id IN (${ids})
+        )
+      `);
+    })();
+
+    // Subquery: lead_ids whose latest assignment is the manager (self pipeline)
+    const selfLeadIds = literal(`
+      (
+        SELECT la.lead_id
+        FROM lead_assignments la
+        INNER JOIN (
+          SELECT lead_id, MAX(id) AS max_id
+          FROM lead_assignments
+          GROUP BY lead_id
+        ) t ON t.max_id = la.id
+        WHERE la.assignee_id = ${manager_id}
+      )
+    `);
+
+    // Counts
+    const [self_leads, team_leads] = await Promise.all([
+      Lead.count({ where: { id: { [Op.in]: selfLeadIds } } }),
+      Lead.count({ where: { id: { [Op.in]: inScopeLeadIds } } }),
+    ]);
+
+    // ------- Leads by member (normalize to include ALL team members with 0s) -------
+    const { User } = require("../models");
+
+    // Fetch team users (display info)
+    const teamUsers = await User.findAll({
+      where: { id: { [Op.in]: assignee_ids } },
+      attributes: ["id", "full_name", "email"],
+      order: [["full_name", "ASC"]],
+      raw: true,
     });
-    return resSuccess(res, data);
+
+    // Count only latest assignment per lead, grouped by assignee_id (within team)
+    const latestGroupedRows = await LeadAssignment.findAll({
+      attributes: ["assignee_id", [fn("COUNT", col("LeadAssignment.lead_id")), "count"]],
+      where: {
+        id: {
+          [Op.in]: literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`),
+        },
+        assignee_id: { [Op.in]: assignee_ids },
+      },
+      group: ["assignee_id"],
+      raw: true,
+    });
+
+    const countMap = new Map();
+    for (const r of latestGroupedRows) {
+      countMap.set(String(r.assignee_id), Number(r.count || 0));
+    }
+
+    const leads_by_member = teamUsers
+      .map((u) => ({
+        assignee_id: u.id,
+        count: countMap.get(String(u.id)) || 0,
+        assignee: { id: u.id, full_name: u.full_name, email: u.email },
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return (a.assignee.full_name || "").localeCompare(b.assignee.full_name || "");
+      });
+
+    // Recent team leads (by created_at) within current team scope
+    const recent_team_leads = await Lead.findAll({
+      attributes: ["id", "first_name", "last_name", "email", "company", "created_at"],
+      where: { id: { [Op.in]: inScopeLeadIds } },
+      include: [
+        { model: LeadStatus, attributes: ["id", "value", "label"] },
+        { model: LeadSource, attributes: ["id", "value", "label"] },
+      ],
+      order: [["created_at", "DESC"]],
+      limit: recentLimit,
+    });
+
+    return resSuccess(res, {
+      self_leads,
+      team_leads,
+      leads_by_member,
+      recent_team_leads,
+    });
   } catch (err) {
     console.error("Dashboard Manager Summary Error:", err);
     return resError(res, "Failed to fetch manager summary");
@@ -259,7 +354,7 @@ const getMyAssignments = async (req, res) => {
           ],
         },
       ],
-      order: [["created_at", "DESC"]],
+      order: [["assigned_at", "DESC"]],
       limit: 25,
     });
 
