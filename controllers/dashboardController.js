@@ -313,18 +313,170 @@ const getManagerSummary = async (req, res) => {
 };
 
 /**
- * GET /api/v1/dashboard/summary/sales_rep?recentLimit=5
+ * GET /api/v1/dashboard/summary/sales_rep?recentLimit=8
  */
 const getSalesRepSummary = async (req, res) => {
   try {
-    const recentLimit = Number(req.query.recentLimit) > 0 ? Number(req.query.recentLimit) : 10;
+    const recentLimit = Number(req.query.recentLimit) > 0 ? Number(req.query.recentLimit) : 8;
+    const userId = req.user.id;
 
-    const data = await buildSummary({
-      assigneeIds: [req.user.id],
-      recentLimit,
-      includeAdminKPIs: false,
+    // Subquery: lead_ids whose LATEST assignment belongs to this user
+    const latestAssignedToMeLeadIds = literal(`
+      (
+        SELECT la.lead_id
+        FROM lead_assignments la
+        INNER JOIN (
+          SELECT lead_id, MAX(id) AS max_id
+          FROM lead_assignments
+          GROUP BY lead_id
+        ) t ON t.max_id = la.id
+        WHERE la.assignee_id = ${userId}
+      )
+    `);
+
+    // Master lists (for zero-filling + metadata)
+    const [allStatuses, allSources] = await Promise.all([
+      LeadStatus.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
+      LeadSource.findAll({ attributes: ["id", "value", "label"], order: [["id", "ASC"]] }),
+    ]);
+
+    // Find the numeric status_id for 'new' (case-insensitive)
+    const newStatus = allStatuses.find((s) => String(s.value || "").toLowerCase() === "new");
+    const newStatusId = newStatus?.id ?? null;
+
+    // ---------- KPIs ----------
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Total in my pipeline (latest assignment = me)
+    const assigned = await Lead.count({
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
     });
-    return resSuccess(res, data);
+
+    // New this week (by created_at) in my pipeline
+    const newThisWeek = await Lead.count({
+      where: {
+        id: { [Op.in]: latestAssignedToMeLeadIds },
+        created_at: { [Op.gte]: sevenDaysAgo },
+      },
+    });
+
+    // Inbox/New (status value == 'new') in my pipeline (use status_id to avoid joins/aliases)
+    const inboxNew = newStatusId
+      ? await Lead.count({
+          where: {
+            id: { [Op.in]: latestAssignedToMeLeadIds },
+            status_id: newStatusId,
+          },
+        })
+      : 0;
+
+    // Avg age (days) of leads in my pipeline
+    const avgAgeRow = await Lead.findOne({
+      attributes: [[fn("AVG", literal("DATEDIFF(NOW(), created_at)")), "avg_days"]],
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
+      raw: true,
+    });
+    const avgAgeDays = Number(avgAgeRow?.avg_days || 0);
+
+    // ---------- Breakdown: by Status / by Source ----------
+    const rawStatusRows = await Lead.findAll({
+      attributes: ["status_id", [fn("COUNT", literal("*")), "count"]],
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
+      group: ["status_id"],
+      raw: true,
+    });
+
+    const rawSourceRows = await Lead.findAll({
+      attributes: ["source_id", [fn("COUNT", literal("*")), "count"]],
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
+      group: ["source_id"],
+      raw: true,
+    });
+
+    // zero-fill + attach metadata
+    const statusCountMap = new Map(rawStatusRows.map((r) => [String(r.status_id), Number(r.count || 0)]));
+    const byStatus = allStatuses.map((s) => ({
+      status_id: s.id,
+      count: statusCountMap.get(String(s.id)) || 0,
+      LeadStatus: { id: s.id, value: s.value, label: s.label },
+    }));
+
+    const sourceCountMap = new Map(
+      rawSourceRows
+        .filter((r) => r.source_id != null) // ignore NULL sources in breakdown
+        .map((r) => [String(r.source_id), Number(r.count || 0)])
+    );
+    const bySource = allSources.map((s) => ({
+      source_id: s.id,
+      count: sourceCountMap.get(String(s.id)) || 0,
+      LeadSource: { id: s.id, value: s.value, label: s.label },
+    }));
+
+    // ---------- Recent assigned to me (latest assignment per lead) ----------
+    const recentAssigned = await LeadAssignment.findAll({
+      attributes: ["id", "lead_id", "assignee_id", "assigned_at"],
+      where: {
+        assignee_id: userId,
+        id: { [Op.in]: literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`) },
+      },
+      include: [
+        {
+          model: Lead,
+          attributes: ["id", "first_name", "last_name", "email", "company", "created_at", "updated_at"],
+          include: [
+            { model: LeadStatus, attributes: ["id", "value", "label"] },
+            { model: LeadSource, attributes: ["id", "value", "label"] },
+          ],
+        },
+      ],
+      order: [["assigned_at", "DESC"]],
+      limit: recentLimit,
+    });
+
+    // ---------- Recent updates in my pipeline ----------
+    const recentUpdates = await Lead.findAll({
+      attributes: ["id", "first_name", "last_name", "email", "company", "created_at", "updated_at"],
+      where: { id: { [Op.in]: latestAssignedToMeLeadIds } },
+      include: [
+        { model: LeadStatus, attributes: ["id", "value", "label"] },
+        { model: LeadSource, attributes: ["id", "value", "label"] },
+      ],
+      order: [["updated_at", "DESC"]],
+      limit: recentLimit,
+    });
+
+    // ---------- Daily intake (last 14 days) ----------
+    const fourteenDaysAgo = new Date();
+    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 13); // inclusive 14-day window
+
+    const dailyRows = await Lead.findAll({
+      attributes: [
+        [literal("DATE(created_at)"), "day"],
+        [fn("COUNT", literal("*")), "count"],
+      ],
+      where: {
+        id: { [Op.in]: latestAssignedToMeLeadIds },
+        created_at: { [Op.gte]: fourteenDaysAgo },
+      },
+      group: [literal("DATE(created_at)")],
+      order: [literal("DATE(created_at) ASC")],
+      raw: true,
+    });
+
+    const dailyIntakeLast14 = dailyRows.map((r) => ({
+      day: r.day, // 'YYYY-MM-DD'
+      count: Number(r.count || 0),
+    }));
+
+    return resSuccess(res, {
+      totals: { assigned, newThisWeek, inboxNew, avgAgeDays },
+      byStatus,
+      bySource,
+      recentAssigned,
+      recentUpdates,
+      dailyIntakeLast14,
+    });
   } catch (err) {
     console.error("Dashboard Sales Rep Summary Error:", err);
     return resError(res, "Failed to fetch sales rep summary");
