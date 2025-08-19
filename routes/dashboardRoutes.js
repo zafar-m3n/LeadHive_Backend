@@ -1,5 +1,10 @@
 const express = require("express");
-const { getSummaryStats, getMyAssignments } = require("../controllers/dashboardController");
+const {
+  getAdminSummary,
+  getManagerSummary,
+  getSalesRepSummary,
+  getMyAssignments,
+} = require("../controllers/dashboardController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const roleMiddleware = require("../middlewares/roleMiddleware");
 
@@ -10,9 +15,11 @@ const router = express.Router();
 // ==============================
 
 // ✅ Summary stats for admin/manager/sales_rep
-router.get("/summary", authMiddleware, roleMiddleware(["admin", "manager", "sales_rep"]), getSummaryStats);
+// routes/dashboardRoutes.js
+router.get("/summary/admin", authMiddleware, roleMiddleware(["admin"]), getAdminSummary);
+router.get("/summary/manager", authMiddleware, roleMiddleware(["manager"]), getManagerSummary);
+router.get("/summary/sales_rep", authMiddleware, roleMiddleware(["sales_rep"]), getSalesRepSummary);
 
-// ✅ Leads assigned to current user (sales rep or manager)
 router.get("/assignments", authMiddleware, roleMiddleware(["manager", "sales_rep"]), getMyAssignments);
 
 module.exports = router;
