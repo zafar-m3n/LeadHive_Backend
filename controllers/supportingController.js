@@ -1,5 +1,6 @@
 const { Role, LeadStatus, LeadSource, User, Team, TeamMember } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
+const { Op } = require("sequelize");
 
 // ==============================
 // Supporting Controller
@@ -136,6 +137,53 @@ const getUnassignedSalesReps = async (req, res) => {
   }
 };
 
+// ✅ Get assignees visible to a manager: all their team members + all admins + the manager themself
+const getAssignableUsersForManager = async (req, res) => {
+  try {
+    // Find teams managed by the current user
+    const teams = await Team.findAll({
+      where: { manager_id: req.user.id },
+      attributes: ["id"],
+    });
+    const teamIds = teams.map((t) => t.id);
+
+    // Team members (active sales reps in those teams)
+    let teamMembers = [];
+    if (teamIds.length) {
+      teamMembers = await User.findAll({
+        where: { is_active: true },
+        include: [
+          { model: Role, where: { value: "sales_rep" }, attributes: [] },
+          { model: Team, where: { id: { [Op.in]: teamIds } }, through: { attributes: [] }, attributes: [] },
+        ],
+        attributes: ["id", "full_name", "email"],
+      });
+    }
+
+    // All active admins
+    const admins = await User.findAll({
+      where: { is_active: true },
+      include: [{ model: Role, where: { value: "admin" }, attributes: [] }],
+      attributes: ["id", "full_name", "email"],
+    });
+
+    // Current manager (self) – include if active
+    const self = await User.findByPk(req.user.id, {
+      attributes: ["id", "full_name", "email", "is_active"],
+    });
+    const selfEntry = self && self.is_active ? [{ id: self.id, full_name: self.full_name, email: self.email }] : [];
+
+    // Combine and de-duplicate by id
+    const combined = [...selfEntry, ...teamMembers, ...admins];
+    const uniqueById = Array.from(new Map(combined.map((u) => [u.id, u])).values());
+
+    return resSuccess(res, uniqueById);
+  } catch (err) {
+    console.error("Error fetching assignable users for manager:", err);
+    return resError(res, "Server error fetching assignable users.");
+  }
+};
+
 // ==============================
 // Exports
 // ==============================
@@ -147,4 +195,5 @@ module.exports = {
   getManagersAndAdmins,
   getTeamMembers,
   getUnassignedSalesReps,
+  getAssignableUsersForManager,
 };
