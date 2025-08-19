@@ -225,6 +225,62 @@ const removeMemberFromTeam = async (req, res) => {
     return resError(res, "Internal server error", 500);
   }
 };
+// GET /api/v1/teams/my
+const getMyTeam = async (req, res) => {
+  try {
+    const managerId = req.user.id;
+
+    const team = await Team.findOne({
+      where: { manager_id: managerId },
+      include: [
+        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
+        // ⚠️ Use the association alias "Users" for the many-to-many members
+        {
+          model: User,
+          as: "Users",
+          through: { attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+      ],
+    });
+
+    if (!team) return resError(res, "You don't have a team yet.", 404);
+    return resSuccess(res, team);
+  } catch (err) {
+    console.error("getMyTeam Error:", err);
+    return resError(res, "Internal server error", 500);
+  }
+};
+
+// DELETE /api/v1/teams/my/members/:userId
+const removeMemberFromMyTeam = async (req, res) => {
+  try {
+    const managerId = req.user.id;
+    const { userId } = req.params;
+
+    const team = await Team.findOne({
+      where: { manager_id: managerId },
+      attributes: ["id", "manager_id"],
+    });
+    if (!team) return resError(res, "You don't have a team yet.", 404);
+
+    if (Number(userId) === Number(managerId)) {
+      return resError(res, "Cannot remove the manager from the team.", 400);
+    }
+
+    const membership = await TeamMember.findOne({
+      where: { team_id: team.id, user_id: Number(userId) },
+    });
+    if (!membership) return resError(res, "User is not in your team.", 404);
+
+    await membership.destroy();
+    return resSuccess(res, { message: "Member removed successfully" });
+  } catch (err) {
+    console.error("removeMemberFromMyTeam Error:", err);
+    return resError(res, "Internal server error", 500);
+  }
+};
 
 // =============================
 // Exports
@@ -237,4 +293,6 @@ module.exports = {
   deleteTeam,
   addMemberToTeam,
   removeMemberFromTeam,
+  getMyTeam,
+  removeMemberFromMyTeam,
 };

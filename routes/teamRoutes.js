@@ -9,6 +9,8 @@ const {
   deleteTeam,
   addMemberToTeam,
   removeMemberFromTeam,
+  getMyTeam,
+  removeMemberFromMyTeam,
 } = require("../controllers/teamController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -20,6 +22,9 @@ const roleMiddleware = require("../middlewares/roleMiddleware");
 
 // All routes require authentication
 router.use(authMiddleware);
+
+router.get("/my", roleMiddleware(["manager"]), getMyTeam);
+router.delete("/my/members/:userId", roleMiddleware(["manager"]), removeMemberFromMyTeam);
 
 /**
  * =============================
