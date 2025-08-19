@@ -184,6 +184,44 @@ const getAssignableUsersForManager = async (req, res) => {
   }
 };
 
+// ✅ Get the manager of the logged-in sales rep's team (no model changes required)
+const getMyManager = async (req, res) => {
+  try {
+    // Find the single team that this user (sales rep) belongs to
+    const team = await Team.findOne({
+      attributes: ["id", "name", "manager_id"],
+      include: [
+        {
+          model: User,
+          attributes: [], // we don't need member fields
+          through: { attributes: [] }, // hide join table
+          where: { id: req.user.id }, // this team has the current user as a member
+          required: true,
+        },
+      ],
+    });
+
+    if (!team) {
+      return resError(res, "You are not assigned to any team.", 404);
+    }
+
+    // Fetch the manager user record
+    const manager = await User.findOne({
+      where: { id: team.manager_id, is_active: true },
+      attributes: ["id", "full_name", "email"],
+    });
+
+    if (!manager) {
+      return resError(res, "Manager not found or inactive.", 404);
+    }
+
+    return resSuccess(res, manager);
+  } catch (err) {
+    console.error("Error fetching manager for sales rep:", err);
+    return resError(res, "Server error fetching manager.");
+  }
+};
+
 // ==============================
 // Exports
 // ==============================
@@ -196,4 +234,5 @@ module.exports = {
   getTeamMembers,
   getUnassignedSalesReps,
   getAssignableUsersForManager,
+  getMyManager,
 };

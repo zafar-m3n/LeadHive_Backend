@@ -8,6 +8,7 @@ const {
   getUnassignedSalesReps,
   getManagersAndAdmins,
   getAssignableUsersForManager,
+  getMyManager,
 } = require("../controllers/supportingController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -42,5 +43,8 @@ router.get("/users/sales/unassigned", authMiddleware, roleMiddleware(["admin", "
 
 // ✅ Get assignable users for a manager (Admin and Manager only)
 router.get("/users/assignable", authMiddleware, roleMiddleware(["admin", "manager"]), getAssignableUsersForManager);
+
+// ✅ Get my manager (for any user)
+router.get("/users/manager", authMiddleware, getMyManager);
 
 module.exports = router;
