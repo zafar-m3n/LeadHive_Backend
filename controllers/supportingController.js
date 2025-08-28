@@ -322,7 +322,7 @@ module.exports = {
   getUnassignedSalesReps,
   getAssignableUsersForManager,
   getMyManager,
-  getManagersForTeam, // New function
-  assignManagerToTeam, // New function
-  removeManagerFromTeam, // New function
+  getManagersForTeam,
+  assignManagerToTeam,
+  removeManagerFromTeam,
 };

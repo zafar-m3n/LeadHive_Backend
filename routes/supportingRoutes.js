@@ -9,6 +9,9 @@ const {
   getManagersAndAdmins,
   getAssignableUsersForManager,
   getMyManager,
+  getManagersForTeam,
+  assignManagerToTeam, 
+  removeManagerFromTeam,
 } = require("../controllers/supportingController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -46,5 +49,14 @@ router.get("/users/assignable", authMiddleware, roleMiddleware(["admin", "manage
 
 // ✅ Get my manager (for any user)
 router.get("/users/manager", authMiddleware, getMyManager);
+
+// ✅ Get all managers for a specific team (New route)
+router.get("/teams/:teamId/managers", authMiddleware, roleMiddleware(["admin", "manager"]), getManagersForTeam);
+
+// ✅ Assign a manager to a team (Admin only)
+router.post("/teams/:id/managers", authMiddleware, roleMiddleware(["admin"]), assignManagerToTeam);
+
+// ✅ Remove a manager from a team (Admin only)
+router.delete("/teams/:id/managers/:userId", authMiddleware, roleMiddleware(["admin"]), removeManagerFromTeam);
 
 module.exports = router;
