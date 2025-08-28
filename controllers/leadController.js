@@ -1,4 +1,3 @@
-// controllers/leadController.js
 const { Op } = require("sequelize");
 const { Lead, LeadStatus, LeadSource, User, LeadAssignment, Team, TeamMember } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
@@ -49,37 +48,21 @@ const createLead = async (req, res) => {
 const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
-    const { status_id, source_id, orderBy, orderDir, search, page = 1, limit = 10 } = req.query;
+    const { status_id, source_id, assignee_id, orderBy, orderDir, search, page = 1, limit = 10 } = req.query;
 
     let whereClause = {};
 
     // --------------------------
     // Role-based restrictions
     // --------------------------
-    if (role === "manager") {
-      const teams = await Team.findAll({ where: { manager_id: userId } });
-      const teamIds = teams.map((t) => t.id);
-
-      const teamMembers = await TeamMember.findAll({
-        where: { team_id: { [Op.in]: teamIds } },
-      });
-      const teamUserIds = teamMembers.map((tm) => tm.user_id).concat(userId);
-
-      const assignments = await LeadAssignment.findAll({
-        where: { assignee_id: { [Op.in]: teamUserIds } },
-      });
-      const leadIds = assignments.map((a) => a.lead_id);
-
-      whereClause.id = { [Op.in]: leadIds };
-    }
-
-    if (role === "sales_rep") {
-      const assignments = await LeadAssignment.findAll({
-        where: { assignee_id: userId },
-      });
-      const leadIds = assignments.map((a) => a.lead_id);
-
-      whereClause.id = { [Op.in]: leadIds };
+    if (role === "manager" || role === "admin") {
+      // Managers and Admins can see all leads and filter by assignee
+      if (assignee_id) {
+        whereClause.assignee_id = assignee_id; // Filter by assignee if provided
+      }
+    } else if (role === "sales_rep") {
+      // Sales reps can only see their own leads
+      whereClause.assignee_id = userId;
     }
 
     // --------------------------
@@ -199,6 +182,11 @@ const updateLead = async (req, res) => {
 
     const lead = await Lead.findByPk(id);
     if (!lead) return resError(res, "Lead not found", 404);
+
+    // Sales reps can only update status if they are the assignee
+    if (req.user.role === "sales_rep" && lead.assignee_id !== req.user.id) {
+      return resError(res, "Sales rep can only update leads assigned to them", 403);
+    }
 
     const { first_name, last_name, company, email, phone, country, status_id, source_id, value_decimal, notes } =
       req.body;

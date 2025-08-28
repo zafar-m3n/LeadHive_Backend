@@ -1,33 +1,45 @@
-const { Team, TeamMember, User } = require("../models");
+const { Team, TeamMember, TeamManager, User } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 const { Op } = require("sequelize");
 
 /**
  * Create a new team (with members)
- * Body: { name, manager_id, members: [user_ids] }
+ * Body: { name, manager_ids: [user_ids], members: [user_ids] }
  */
 const createTeam = async (req, res) => {
   try {
-    const { name, manager_id, members = [] } = req.body;
+    const { name, manager_ids = [], members = [] } = req.body;
 
-    if (!name || !manager_id) {
-      return resError(res, "Team name and manager_id are required", 400);
+    if (!name || manager_ids.length === 0) {
+      return resError(res, "Team name and at least one manager are required", 400);
     }
 
-    // Check manager exists
-    const manager = await User.findByPk(manager_id);
-    if (!manager) return resError(res, "Manager not found", 404);
+    // Create the team
+    const team = await Team.create({ name });
 
-    const team = await Team.create({ name, manager_id });
+    // Add managers to the team
+    if (Array.isArray(manager_ids) && manager_ids.length > 0) {
+      const validManagers = await User.findAll({
+        where: { id: { [Op.in]: manager_ids }, is_active: true },
+        attributes: ["id"],
+      });
+
+      const bulkManagers = validManagers.map((u) => ({
+        team_id: team.id,
+        manager_id: u.id,
+      }));
+
+      await TeamManager.bulkCreate(bulkManagers);
+    }
 
     // Add members if provided
     if (Array.isArray(members) && members.length > 0) {
-      const validUsers = await User.findAll({
+      const validMembers = await User.findAll({
         where: { id: { [Op.in]: members }, is_active: true },
         attributes: ["id"],
       });
 
-      const bulkMembers = validUsers.map((u) => ({
+      const bulkMembers = validMembers.map((u) => ({
         team_id: team.id,
         user_id: u.id,
       }));
@@ -108,28 +120,42 @@ const getTeamById = async (req, res) => {
 };
 
 /**
- * Update team (name, manager, members)
- * Body: { name?, manager_id?, members?: [user_ids] }
+ * Update team (name, manager(s), members)
+ * Body: { name?, manager_ids?: [user_ids], members?: [user_ids] }
  */
 const updateTeam = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, manager_id, members } = req.body;
+    const { name, manager_ids, members } = req.body;
 
     const team = await Team.findByPk(id);
     if (!team) return resError(res, "Team not found", 404);
 
     if (name !== undefined) team.name = name;
-    if (manager_id !== undefined) {
-      const manager = await User.findByPk(manager_id);
-      if (!manager) return resError(res, "Manager not found", 404);
-      team.manager_id = manager_id;
-    }
     await team.save();
+
+    // Handle manager updates (replace all managers)
+    if (Array.isArray(manager_ids)) {
+      // Remove existing managers
+      await TeamManager.destroy({ where: { team_id: id } });
+
+      // Add new managers
+      const validManagers = await User.findAll({
+        where: { id: { [Op.in]: manager_ids }, is_active: true },
+        attributes: ["id"],
+      });
+
+      const bulkManagers = validManagers.map((u) => ({
+        team_id: id,
+        manager_id: u.id,
+      }));
+
+      await TeamManager.bulkCreate(bulkManagers);
+    }
 
     // Handle members update (replace)
     if (Array.isArray(members)) {
-      // Remove existing
+      // Remove existing members
       await TeamMember.destroy({ where: { team_id: id } });
 
       if (members.length > 0) {
@@ -172,6 +198,7 @@ const deleteTeam = async (req, res) => {
     if (!team) return resError(res, "Team not found", 404);
 
     await TeamMember.destroy({ where: { team_id: id } });
+    await TeamManager.destroy({ where: { team_id: id } });
     await team.destroy();
 
     return resSuccess(res, { message: "Team deleted successfully" });
@@ -225,7 +252,11 @@ const removeMemberFromTeam = async (req, res) => {
     return resError(res, "Internal server error", 500);
   }
 };
-// GET /api/v1/teams/my
+
+/**
+ * GET /api/v1/teams/my
+ * Get the team that the current user is managing
+ */
 const getMyTeam = async (req, res) => {
   try {
     const managerId = req.user.id;
@@ -253,7 +284,10 @@ const getMyTeam = async (req, res) => {
   }
 };
 
-// DELETE /api/v1/teams/my/members/:userId
+/**
+ * DELETE /api/v1/teams/my/members/:userId
+ * Remove a member from the current user's team
+ */
 const removeMemberFromMyTeam = async (req, res) => {
   try {
     const managerId = req.user.id;

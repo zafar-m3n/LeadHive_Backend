@@ -1,4 +1,4 @@
-const { Role, LeadStatus, LeadSource, User, Team, TeamMember } = require("../models");
+const { Role, LeadStatus, LeadSource, User, Team, TeamMember, TeamManager } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 const { Op } = require("sequelize");
 
@@ -222,6 +222,93 @@ const getMyManager = async (req, res) => {
   }
 };
 
+// ✅ Get all managers for a specific team (new function)
+const getManagersForTeam = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    const managers = await User.findAll({
+      include: [
+        {
+          model: TeamManager,
+          where: { team_id: teamId },
+          attributes: [],
+        },
+        {
+          model: Role,
+          where: { value: "manager" },
+          attributes: ["id", "value", "label"],
+        },
+      ],
+      attributes: ["id", "full_name", "email"],
+    });
+
+    if (!managers || managers.length === 0) {
+      return resError(res, "No managers found for this team.", 404);
+    }
+
+    return resSuccess(res, managers);
+  } catch (err) {
+    console.error("Error fetching managers for team:", err);
+    return resError(res, "Server error fetching managers for team.");
+  }
+};
+
+// ✅ Assign a manager to a team (new function)
+const assignManagerToTeam = async (req, res) => {
+  try {
+    const { teamId, userId } = req.body;
+
+    const team = await Team.findByPk(teamId);
+    if (!team) return resError(res, "Team not found", 404);
+
+    const user = await User.findByPk(userId);
+    if (!user) return resError(res, "User not found", 404);
+
+    const exists = await TeamManager.findOne({
+      where: { team_id: teamId, manager_id: userId },
+    });
+
+    if (exists) return resError(res, "User is already a manager of this team.", 400);
+
+    await TeamManager.create({
+      team_id: teamId,
+      manager_id: userId,
+    });
+
+    return resSuccess(res, { message: "Manager assigned to team successfully." }, 201);
+  } catch (err) {
+    console.error("Error assigning manager to team:", err);
+    return resError(res, "Server error assigning manager to team.");
+  }
+};
+
+// ✅ Remove a manager from a team (new function)
+const removeManagerFromTeam = async (req, res) => {
+  try {
+    const { teamId, userId } = req.body;
+
+    const team = await Team.findByPk(teamId);
+    if (!team) return resError(res, "Team not found", 404);
+
+    const user = await User.findByPk(userId);
+    if (!user) return resError(res, "User not found", 404);
+
+    const manager = await TeamManager.findOne({
+      where: { team_id: teamId, manager_id: userId },
+    });
+
+    if (!manager) return resError(res, "User is not a manager of this team.", 404);
+
+    await manager.destroy();
+
+    return resSuccess(res, { message: "Manager removed from team successfully." });
+  } catch (err) {
+    console.error("Error removing manager from team:", err);
+    return resError(res, "Server error removing manager from team.");
+  }
+};
+
 // ==============================
 // Exports
 // ==============================
@@ -235,4 +322,7 @@ module.exports = {
   getUnassignedSalesReps,
   getAssignableUsersForManager,
   getMyManager,
+  getManagersForTeam, // New function
+  assignManagerToTeam, // New function
+  removeManagerFromTeam, // New function
 };
