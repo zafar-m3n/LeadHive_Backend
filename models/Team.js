@@ -14,14 +14,6 @@ const Team = sequelize.define(
       allowNull: false,
       unique: true,
     },
-    manager_id: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      references: {
-        model: "users",
-        key: "id",
-      },
-    },
   },
   {
     tableName: "teams",

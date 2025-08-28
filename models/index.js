@@ -7,6 +7,7 @@ const TeamMember = require("./TeamMember");
 const Lead = require("./Lead");
 const LeadAssignment = require("./LeadAssignment");
 const SavedFilter = require("./SavedFilter");
+const TeamManager = require("./TeamManager");
 
 // =============================
 // Associations
@@ -17,8 +18,17 @@ Role.hasMany(User, { foreignKey: "role_id" });
 User.belongsTo(Role, { foreignKey: "role_id" });
 
 // --- Teams & Users ---
-User.hasMany(Team, { foreignKey: "manager_id" });
-Team.belongsTo(User, { as: "manager", foreignKey: "manager_id" });
+// Removed the `manager_id` from the Team model, and now it's handled by the TeamManager model.
+Team.belongsToMany(User, {
+  through: TeamManager,
+  foreignKey: "team_id",
+  otherKey: "manager_id",
+});
+User.belongsToMany(Team, {
+  through: TeamManager,
+  foreignKey: "manager_id",
+  otherKey: "team_id",
+});
 
 // --- Team Members (many-to-many between Teams and Users) ---
 Team.belongsToMany(User, {
@@ -73,4 +83,5 @@ module.exports = {
   Lead,
   LeadAssignment,
   SavedFilter,
+  TeamManager,
 };
