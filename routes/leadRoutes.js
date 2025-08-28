@@ -33,7 +33,7 @@ router.get("/:id/assignments", roleMiddleware(["admin", "manager", "sales_rep"])
  * =============================
  */
 router.post("/", roleMiddleware(["admin", "manager"]), createLead);
-router.put("/:id", roleMiddleware(["admin", "manager"]), updateLead);
+router.put("/:id", roleMiddleware(["admin", "manager", "sales_rep"]), updateLead);
 router.delete("/:id", roleMiddleware(["admin", "manager"]), deleteLead);
 router.post("/:id/assign", roleMiddleware(["admin", "manager"]), assignLead);
 
