@@ -1,24 +1,25 @@
+// controllers/teamController.js
 const { Team, TeamMember, TeamManager, User } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
 const { Op } = require("sequelize");
 
 /**
- * Create a new team (with members)
- * Body: { name, manager_ids: [user_ids], members: [user_ids] }
+ * Create a new team (with managers and members)
+ * Body: { name, manager_ids: number[], members?: number[] }
  */
 const createTeam = async (req, res) => {
   try {
     const { name, manager_ids = [], members = [] } = req.body;
 
-    if (!name || manager_ids.length === 0) {
+    if (!name || !Array.isArray(manager_ids) || manager_ids.length === 0) {
       return resError(res, "Team name and at least one manager are required", 400);
     }
 
-    // Create the team
+    // Create team
     const team = await Team.create({ name });
 
-    // Add managers to the team
-    if (Array.isArray(manager_ids) && manager_ids.length > 0) {
+    // Add managers via TeamManager
+    if (manager_ids.length > 0) {
       const validManagers = await User.findAll({
         where: { id: { [Op.in]: manager_ids }, is_active: true },
         attributes: ["id"],
@@ -28,11 +29,12 @@ const createTeam = async (req, res) => {
         team_id: team.id,
         manager_id: u.id,
       }));
-
-      await TeamManager.bulkCreate(bulkManagers);
+      if (bulkManagers.length > 0) {
+        await TeamManager.bulkCreate(bulkManagers);
+      }
     }
 
-    // Add members if provided
+    // Add members via TeamMember
     if (Array.isArray(members) && members.length > 0) {
       const validMembers = await User.findAll({
         where: { id: { [Op.in]: members }, is_active: true },
@@ -43,15 +45,28 @@ const createTeam = async (req, res) => {
         team_id: team.id,
         user_id: u.id,
       }));
-
-      await TeamMember.bulkCreate(bulkMembers);
+      if (bulkMembers.length > 0) {
+        await TeamMember.bulkCreate(bulkMembers);
+      }
     }
 
-    // Fetch created team with relations
+    // Fetch created team with relations (using aliases)
     const created = await Team.findByPk(team.id, {
       include: [
-        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
+        {
+          model: User,
+          as: "managers",
+          through: { model: TeamManager, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "members",
+          through: { model: TeamMember, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
       ],
     });
 
@@ -63,20 +78,36 @@ const createTeam = async (req, res) => {
 };
 
 /**
- * Get all teams with manager and members + pagination
+ * Get all teams with managers and members + pagination
  * Query params: ?page=1&limit=10
  */
 const getTeams = async (req, res) => {
   try {
     let { page = 1, limit = 10 } = req.query;
-    page = parseInt(page);
-    limit = parseInt(limit);
+
+    page = parseInt(page, 10);
+    limit = parseInt(limit, 10);
+    if (Number.isNaN(page) || page < 1) page = 1;
+    if (Number.isNaN(limit) || limit < 1) limit = 10;
+
     const offset = (page - 1) * limit;
 
     const { count, rows } = await Team.findAndCountAll({
       include: [
-        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
+        {
+          model: User,
+          as: "managers",
+          through: { model: TeamManager, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "members",
+          through: { model: TeamMember, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
       ],
       order: [["id", "ASC"]],
       offset,
@@ -105,8 +136,20 @@ const getTeamById = async (req, res) => {
 
     const team = await Team.findByPk(id, {
       include: [
-        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
+        {
+          model: User,
+          as: "managers",
+          through: { model: TeamManager, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "members",
+          through: { model: TeamMember, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
       ],
     });
 
@@ -121,7 +164,7 @@ const getTeamById = async (req, res) => {
 
 /**
  * Update team (name, manager(s), members)
- * Body: { name?, manager_ids?: [user_ids], members?: [user_ids] }
+ * Body: { name?, manager_ids?: number[], members?: number[] }
  */
 const updateTeam = async (req, res) => {
   try {
@@ -131,31 +174,33 @@ const updateTeam = async (req, res) => {
     const team = await Team.findByPk(id);
     if (!team) return resError(res, "Team not found", 404);
 
-    if (name !== undefined) team.name = name;
-    await team.save();
-
-    // Handle manager updates (replace all managers)
-    if (Array.isArray(manager_ids)) {
-      // Remove existing managers
-      await TeamManager.destroy({ where: { team_id: id } });
-
-      // Add new managers
-      const validManagers = await User.findAll({
-        where: { id: { [Op.in]: manager_ids }, is_active: true },
-        attributes: ["id"],
-      });
-
-      const bulkManagers = validManagers.map((u) => ({
-        team_id: id,
-        manager_id: u.id,
-      }));
-
-      await TeamManager.bulkCreate(bulkManagers);
+    if (name !== undefined) {
+      team.name = name;
+      await team.save();
     }
 
-    // Handle members update (replace)
+    // Replace all managers if manager_ids provided
+    if (Array.isArray(manager_ids)) {
+      await TeamManager.destroy({ where: { team_id: id } });
+
+      if (manager_ids.length > 0) {
+        const validManagers = await User.findAll({
+          where: { id: { [Op.in]: manager_ids }, is_active: true },
+          attributes: ["id"],
+        });
+
+        const bulkManagers = validManagers.map((u) => ({
+          team_id: id,
+          manager_id: u.id,
+        }));
+        if (bulkManagers.length > 0) {
+          await TeamManager.bulkCreate(bulkManagers);
+        }
+      }
+    }
+
+    // Replace all members if members provided
     if (Array.isArray(members)) {
-      // Remove existing members
       await TeamMember.destroy({ where: { team_id: id } });
 
       if (members.length > 0) {
@@ -168,15 +213,28 @@ const updateTeam = async (req, res) => {
           team_id: id,
           user_id: u.id,
         }));
-
-        await TeamMember.bulkCreate(bulkMembers);
+        if (bulkMembers.length > 0) {
+          await TeamMember.bulkCreate(bulkMembers);
+        }
       }
     }
 
     const updated = await Team.findByPk(id, {
       include: [
-        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        { model: User, through: { attributes: [] }, attributes: ["id", "full_name", "email"] },
+        {
+          model: User,
+          as: "managers",
+          through: { model: TeamManager, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "members",
+          through: { model: TeamMember, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
       ],
     });
 
@@ -188,7 +246,7 @@ const updateTeam = async (req, res) => {
 };
 
 /**
- * Delete team (remove members first, then team)
+ * Delete team (remove members & managers first, then team)
  */
 const deleteTeam = async (req, res) => {
   try {
@@ -209,7 +267,8 @@ const deleteTeam = async (req, res) => {
 };
 
 /**
- * Add a member to team
+ * Add a member to a team
+ * Body: { user_id }
  */
 const addMemberToTeam = async (req, res) => {
   try {
@@ -226,7 +285,6 @@ const addMemberToTeam = async (req, res) => {
     if (exists) return resError(res, "User already in team", 400);
 
     await TeamMember.create({ team_id: id, user_id });
-
     return resSuccess(res, { message: "Member added successfully" }, 201);
   } catch (err) {
     console.error("AddMember Error:", err);
@@ -235,7 +293,7 @@ const addMemberToTeam = async (req, res) => {
 };
 
 /**
- * Remove a member from team
+ * Remove a member from a team
  */
 const removeMemberFromTeam = async (req, res) => {
   try {
@@ -245,7 +303,6 @@ const removeMemberFromTeam = async (req, res) => {
     if (!membership) return resError(res, "User is not in this team", 404);
 
     await membership.destroy();
-
     return resSuccess(res, { message: "Member removed successfully" });
   } catch (err) {
     console.error("RemoveMember Error:", err);
@@ -255,21 +312,34 @@ const removeMemberFromTeam = async (req, res) => {
 
 /**
  * GET /api/v1/teams/my
- * Get the team that the current user is managing
+ * Get ONE team that the current user manages (via TeamManager)
+ * NOTE: if a manager can manage multiple teams, you may want a /my/list endpoint.
  */
 const getMyTeam = async (req, res) => {
   try {
     const managerId = req.user.id;
 
-    const team = await Team.findOne({
+    // Find any team_id where this user is a manager
+    const tm = await TeamManager.findOne({
       where: { manager_id: managerId },
+      attributes: ["team_id"],
+    });
+
+    if (!tm) return resError(res, "You don't have a team yet.", 404);
+
+    const team = await Team.findByPk(tm.team_id, {
       include: [
-        { model: User, as: "manager", attributes: ["id", "full_name", "email"] },
-        // ⚠️ Use the association alias "Users" for the many-to-many members
         {
           model: User,
-          as: "Users",
-          through: { attributes: [] },
+          as: "managers",
+          through: { model: TeamManager, attributes: [] },
+          attributes: ["id", "full_name", "email"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "members",
+          through: { model: TeamMember, attributes: [] },
           attributes: ["id", "full_name", "email"],
           required: false,
         },
@@ -286,25 +356,25 @@ const getMyTeam = async (req, res) => {
 
 /**
  * DELETE /api/v1/teams/my/members/:userId
- * Remove a member from the current user's team
+ * Remove a member from the current user's team (via TeamManager)
  */
 const removeMemberFromMyTeam = async (req, res) => {
   try {
     const managerId = req.user.id;
     const { userId } = req.params;
 
-    const team = await Team.findOne({
+    const tm = await TeamManager.findOne({
       where: { manager_id: managerId },
-      attributes: ["id", "manager_id"],
+      attributes: ["team_id"],
     });
-    if (!team) return resError(res, "You don't have a team yet.", 404);
+    if (!tm) return resError(res, "You don't have a team yet.", 404);
 
     if (Number(userId) === Number(managerId)) {
       return resError(res, "Cannot remove the manager from the team.", 400);
     }
 
     const membership = await TeamMember.findOne({
-      where: { team_id: team.id, user_id: Number(userId) },
+      where: { team_id: tm.team_id, user_id: Number(userId) },
     });
     if (!membership) return resError(res, "User is not in your team.", 404);
 

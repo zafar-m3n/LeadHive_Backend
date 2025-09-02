@@ -18,14 +18,15 @@ Role.hasMany(User, { foreignKey: "role_id" });
 User.belongsTo(Role, { foreignKey: "role_id" });
 
 // --- Teams & Users ---
-// Removed the `manager_id` from the Team model, and now it's handled by the TeamManager model.
 Team.belongsToMany(User, {
   through: TeamManager,
+  as: "managers",
   foreignKey: "team_id",
   otherKey: "manager_id",
 });
 User.belongsToMany(Team, {
   through: TeamManager,
+  as: "managedTeams",
   foreignKey: "manager_id",
   otherKey: "team_id",
 });
@@ -33,11 +34,13 @@ User.belongsToMany(Team, {
 // --- Team Members (many-to-many between Teams and Users) ---
 Team.belongsToMany(User, {
   through: TeamMember,
+  as: "members",
   foreignKey: "team_id",
   otherKey: "user_id",
 });
 User.belongsToMany(Team, {
   through: TeamMember,
+  as: "memberOfTeams",
   foreignKey: "user_id",
   otherKey: "team_id",
 });

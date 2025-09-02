@@ -137,6 +137,36 @@ const getUnassignedSalesReps = async (req, res) => {
   }
 };
 
+// ✅ Get unassigned active managers
+const getUnassignedManagers = async (req, res) => {
+  try {
+    // 1. Find all active users with role = 'manager'
+    const managers = await User.findAll({
+      where: { is_active: true },
+      include: [
+        {
+          model: Role,
+          where: { value: "manager" },
+          attributes: [],
+        },
+      ],
+      attributes: ["id", "full_name", "email"],
+    });
+
+    // 2. Get all assigned manager IDs from TeamManagers
+    const assignedManagers = await TeamManager.findAll({ attributes: ["manager_id"] });
+    const assignedIds = assignedManagers.map((m) => m.manager_id);
+
+    // 3. Filter out assigned managers
+    const unassigned = managers.filter((m) => !assignedIds.includes(m.id));
+
+    return resSuccess(res, unassigned);
+  } catch (err) {
+    console.error("Error fetching unassigned managers:", err);
+    return resError(res, "Server error fetching unassigned managers.");
+  }
+};
+
 // ✅ Get assignees visible to a manager: all their team members + all admins + the manager themself
 const getAssignableUsersForManager = async (req, res) => {
   try {
@@ -320,6 +350,7 @@ module.exports = {
   getManagersAndAdmins,
   getTeamMembers,
   getUnassignedSalesReps,
+  getUnassignedManagers,
   getAssignableUsersForManager,
   getMyManager,
   getManagersForTeam,
