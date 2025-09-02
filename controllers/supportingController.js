@@ -47,7 +47,7 @@ const getManagers = async (req, res) => {
       include: [
         {
           model: Role,
-          where: { value: "manager" }, // role value must be 'manager'
+          where: { value: "manager" },
           attributes: [],
         },
       ],
@@ -68,7 +68,7 @@ const getManagersAndAdmins = async (req, res) => {
       include: [
         {
           model: Role,
-          where: { value: ["manager", "admin"] }, // both roles
+          where: { value: { [Op.in]: ["manager", "admin"] } },
           attributes: [],
         },
       ],
@@ -81,7 +81,7 @@ const getManagersAndAdmins = async (req, res) => {
   }
 };
 
-// ✅ Get all team members for a manager’s team
+// ✅ Get all team members for a team (uses alias "members")
 const getTeamMembers = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -90,17 +90,17 @@ const getTeamMembers = async (req, res) => {
       include: [
         {
           model: User,
-          through: { attributes: [] }, // hide join table
+          as: "members",
+          through: { attributes: [] },
           attributes: ["id", "full_name", "email"],
+          required: false,
         },
       ],
     });
 
-    if (!team) {
-      return resError(res, "Team not found.", 404);
-    }
+    if (!team) return resError(res, "Team not found.", 404);
 
-    return resSuccess(res, team.Users);
+    return resSuccess(res, team.members || []);
   } catch (err) {
     console.error("Error fetching team members:", err);
     return resError(res, "Server error fetching team members.");
@@ -110,7 +110,6 @@ const getTeamMembers = async (req, res) => {
 // ✅ Get unassigned active sales reps
 const getUnassignedSalesReps = async (req, res) => {
   try {
-    // 1. Find all active users with role = 'salesrep'
     const salesReps = await User.findAll({
       where: { is_active: true },
       include: [
@@ -123,12 +122,10 @@ const getUnassignedSalesReps = async (req, res) => {
       attributes: ["id", "full_name", "email"],
     });
 
-    // 2. Get all assigned user IDs from TeamMembers
     const assignedMembers = await TeamMember.findAll({ attributes: ["user_id"] });
-    const assignedIds = assignedMembers.map((m) => m.user_id);
+    const assignedIds = new Set(assignedMembers.map((m) => m.user_id));
 
-    // 3. Filter out assigned reps
-    const unassignedReps = salesReps.filter((rep) => !assignedIds.includes(rep.id));
+    const unassignedReps = salesReps.filter((rep) => !assignedIds.has(rep.id));
 
     return resSuccess(res, unassignedReps);
   } catch (err) {
@@ -140,7 +137,6 @@ const getUnassignedSalesReps = async (req, res) => {
 // ✅ Get unassigned active managers
 const getUnassignedManagers = async (req, res) => {
   try {
-    // 1. Find all active users with role = 'manager'
     const managers = await User.findAll({
       where: { is_active: true },
       include: [
@@ -153,12 +149,10 @@ const getUnassignedManagers = async (req, res) => {
       attributes: ["id", "full_name", "email"],
     });
 
-    // 2. Get all assigned manager IDs from TeamManagers
     const assignedManagers = await TeamManager.findAll({ attributes: ["manager_id"] });
-    const assignedIds = assignedManagers.map((m) => m.manager_id);
+    const assignedIds = new Set(assignedManagers.map((m) => m.manager_id));
 
-    // 3. Filter out assigned managers
-    const unassigned = managers.filter((m) => !assignedIds.includes(m.id));
+    const unassigned = managers.filter((m) => !assignedIds.has(m.id));
 
     return resSuccess(res, unassigned);
   } catch (err) {
@@ -167,43 +161,59 @@ const getUnassignedManagers = async (req, res) => {
   }
 };
 
-// ✅ Get assignees visible to a manager: all their team members + all admins + the manager themself
+// ✅ Get assignees visible to a manager:
 const getAssignableUsersForManager = async (req, res) => {
   try {
-    // Find teams managed by the current user
-    const teams = await Team.findAll({
-      where: { manager_id: req.user.id },
+    const managedTeams = await Team.findAll({
       attributes: ["id"],
+      include: [
+        {
+          model: User,
+          as: "managers",
+          attributes: [],
+          through: { attributes: [] },
+          where: { id: req.user.id },
+          required: true,
+        },
+      ],
     });
-    const teamIds = teams.map((t) => t.id);
 
-    // Team members (active sales reps in those teams)
+    const teamIds = managedTeams.map((t) => t.id);
+
     let teamMembers = [];
     if (teamIds.length) {
       teamMembers = await User.findAll({
         where: { is_active: true },
         include: [
-          { model: Role, where: { value: "sales_rep" }, attributes: [] },
-          { model: Team, where: { id: { [Op.in]: teamIds } }, through: { attributes: [] }, attributes: [] },
+          {
+            model: Role,
+            where: { value: "sales_rep" },
+            attributes: [],
+          },
+          {
+            model: Team,
+            as: "memberOfTeams",
+            where: { id: { [Op.in]: teamIds } },
+            attributes: [],
+            through: { attributes: [] },
+            required: true,
+          },
         ],
         attributes: ["id", "full_name", "email"],
       });
     }
 
-    // All active admins
     const admins = await User.findAll({
       where: { is_active: true },
       include: [{ model: Role, where: { value: "admin" }, attributes: [] }],
       attributes: ["id", "full_name", "email"],
     });
 
-    // Current manager (self) – include if active
     const self = await User.findByPk(req.user.id, {
       attributes: ["id", "full_name", "email", "is_active"],
     });
     const selfEntry = self && self.is_active ? [{ id: self.id, full_name: self.full_name, email: self.email }] : [];
 
-    // Combine and de-duplicate by id
     const combined = [...selfEntry, ...teamMembers, ...admins];
     const uniqueById = Array.from(new Map(combined.map((u) => [u.id, u])).values());
 
@@ -214,66 +224,86 @@ const getAssignableUsersForManager = async (req, res) => {
   }
 };
 
-// ✅ Get the manager of the logged-in sales rep's team (no model changes required)
+// ✅ Get the manager(s) of the logged-in sales rep's team(s)
 const getMyManager = async (req, res) => {
   try {
-    // Find the single team that this user (sales rep) belongs to
-    const team = await Team.findOne({
-      attributes: ["id", "name", "manager_id"],
+    const teams = await Team.findAll({
+      attributes: ["id", "name"],
       include: [
         {
           model: User,
-          attributes: [], // we don't need member fields
-          through: { attributes: [] }, // hide join table
-          where: { id: req.user.id }, // this team has the current user as a member
+          as: "members",
+          attributes: [],
+          through: { attributes: [] },
+          where: { id: req.user.id },
           required: true,
         },
       ],
     });
 
-    if (!team) {
+    if (!teams.length) {
       return resError(res, "You are not assigned to any team.", 404);
     }
 
-    // Fetch the manager user record
-    const manager = await User.findOne({
-      where: { id: team.manager_id, is_active: true },
+    const teamIds = teams.map((t) => t.id);
+
+    const managers = await User.findAll({
+      where: { is_active: true },
       attributes: ["id", "full_name", "email"],
+      include: [
+        {
+          model: Role,
+          where: { value: "manager" },
+          attributes: [],
+        },
+        {
+          model: Team,
+          as: "managedTeams",
+          attributes: [],
+          through: { attributes: [] },
+          where: { id: { [Op.in]: teamIds } },
+          required: true,
+        },
+      ],
     });
 
-    if (!manager) {
-      return resError(res, "Manager not found or inactive.", 404);
+    if (!managers.length) {
+      return resError(res, "No managers found for your team(s).", 404);
     }
 
-    return resSuccess(res, manager);
+    return resSuccess(res, managers);
   } catch (err) {
-    console.error("Error fetching manager for sales rep:", err);
-    return resError(res, "Server error fetching manager.");
+    console.error("Error fetching manager(s) for sales rep:", err);
+    return resError(res, "Server error fetching manager(s).");
   }
 };
 
-// ✅ Get all managers for a specific team (new function)
+// ✅ Get all managers for a specific team
 const getManagersForTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
 
     const managers = await User.findAll({
+      where: { is_active: true },
+      attributes: ["id", "full_name", "email"],
       include: [
-        {
-          model: TeamManager,
-          where: { team_id: teamId },
-          attributes: [],
-        },
         {
           model: Role,
           where: { value: "manager" },
-          attributes: ["id", "value", "label"],
+          attributes: [],
+        },
+        {
+          model: Team,
+          as: "managedTeams",
+          where: { id: teamId },
+          attributes: [],
+          through: { attributes: [] },
+          required: true,
         },
       ],
-      attributes: ["id", "full_name", "email"],
     });
 
-    if (!managers || managers.length === 0) {
+    if (!managers.length) {
       return resError(res, "No managers found for this team.", 404);
     }
 
@@ -284,7 +314,6 @@ const getManagersForTeam = async (req, res) => {
   }
 };
 
-// ✅ Assign a manager to a team (new function)
 const assignManagerToTeam = async (req, res) => {
   try {
     const { teamId, userId } = req.body;
@@ -292,19 +321,27 @@ const assignManagerToTeam = async (req, res) => {
     const team = await Team.findByPk(teamId);
     if (!team) return resError(res, "Team not found", 404);
 
-    const user = await User.findByPk(userId);
+    const user = await User.findByPk(userId, {
+      include: [{ model: Role, attributes: ["value"] }],
+    });
     if (!user) return resError(res, "User not found", 404);
+
+    // Optional: ensure user is actually a manager-role
+    const hasManagerRole = Array.isArray(user.Roles)
+      ? user.Roles.some((r) => r.value === "manager")
+      : user.Role && user.Role.value === "manager";
+    // If your model uses User.belongsTo(Role) (not many-to-many), tweak above:
+    // const hasManagerRole = user.Role?.value === "manager";
+
+    // If you strictly require manager role to be assigned:
+    // if (!hasManagerRole) return resError(res, "User is not a manager.", 400);
 
     const exists = await TeamManager.findOne({
       where: { team_id: teamId, manager_id: userId },
     });
-
     if (exists) return resError(res, "User is already a manager of this team.", 400);
 
-    await TeamManager.create({
-      team_id: teamId,
-      manager_id: userId,
-    });
+    await TeamManager.create({ team_id: teamId, manager_id: userId });
 
     return resSuccess(res, { message: "Manager assigned to team successfully." }, 201);
   } catch (err) {
@@ -313,7 +350,7 @@ const assignManagerToTeam = async (req, res) => {
   }
 };
 
-// ✅ Remove a manager from a team (new function)
+// ✅ Remove a manager from a team
 const removeManagerFromTeam = async (req, res) => {
   try {
     const { teamId, userId } = req.body;
@@ -339,6 +376,29 @@ const removeManagerFromTeam = async (req, res) => {
   }
 };
 
+const getAssignees = async (req, res) => {
+  try {
+    const role = req.user?.role;
+    if (!["admin", "manager"].includes(role)) {
+      return resError(res, "Forbidden", 403);
+    }
+
+    const users = await User.findAll({
+      where: { is_active: true },
+      attributes: ["id", "full_name", "email"],
+      order: [
+        ["full_name", "ASC"],
+        ["id", "ASC"],
+      ],
+    });
+
+    return resSuccess(res, users);
+  } catch (err) {
+    console.error("Error fetching assignees:", err);
+    return resError(res, "Server error fetching assignees.");
+  }
+};
+
 // ==============================
 // Exports
 // ==============================
@@ -356,4 +416,5 @@ module.exports = {
   getManagersForTeam,
   assignManagerToTeam,
   removeManagerFromTeam,
+  getAssignees,
 };

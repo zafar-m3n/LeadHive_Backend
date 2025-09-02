@@ -1,4 +1,3 @@
-// controllers/dashboardController.js
 const {
   Lead,
   LeadStatus,
@@ -6,8 +5,9 @@ const {
   LeadAssignment,
   Team,
   TeamMember, // through table for team membership
+  TeamManager, // ⬅ added for multi-manager lookup
 } = require("../models");
-const { Op, fn, col, literal, where } = require("sequelize");
+const { Op, fn, col, literal } = require("sequelize");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
 // ==============================
@@ -155,22 +155,27 @@ const buildSummary = async ({
   };
 };
 
-/** Resolve manager's assignee scope: self + all users in teams they manage */
+/** Resolve manager's assignee scope: self + all users in teams they manage (via TeamManager) */
 const resolveManagerAssignees = async (managerId) => {
-  const teams = await Team.findAll({
+  // Teams managed by this user
+  const tmRows = await TeamManager.findAll({
     where: { manager_id: managerId },
-    attributes: ["id"],
+    attributes: ["team_id"],
     raw: true,
   });
-  const teamIds = teams.map((t) => t.id);
+  const teamIds = tmRows.map((r) => r.team_id);
   if (teamIds.length === 0) return [managerId];
 
-  const members = await TeamMember.findAll({
+  // Members of those teams
+  const memberRows = await TeamMember.findAll({
     where: { team_id: { [Op.in]: teamIds } },
     attributes: ["user_id"],
     raw: true,
   });
-  const memberIds = members.map((m) => m.user_id);
+
+  const memberIds = memberRows.map((r) => r.user_id);
+
+  // De-dupe and include the manager themselves
   return Array.from(new Set([managerId, ...memberIds]));
 };
 

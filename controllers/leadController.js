@@ -1,6 +1,31 @@
-const { Op } = require("sequelize");
-const { Lead, LeadStatus, LeadSource, User, LeadAssignment, Team, TeamMember } = require("../models");
+"use strict";
+
+const { Op, literal } = require("sequelize");
+const { Lead, LeadStatus, LeadSource, User, LeadAssignment } = require("../models");
 const { resSuccess, resError } = require("../utils/responseUtil");
+
+/** Subquery: latest LeadAssignment row id per lead */
+const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
+
+/** Build include that joins ONLY the latest assignment per lead; optionally filter by assignee_id */
+const buildLatestAssignmentInclude = (assigneeId = null) => {
+  const where = { id: { [Op.in]: LATEST_ASSIGNMENT_IDS } };
+  if (assigneeId) where.assignee_id = Number(assigneeId);
+
+  return {
+    model: LeadAssignment,
+    as: "LeadAssignments",
+    required: !!assigneeId, // require join only if scoping by assignee
+    where,
+    include: [
+      {
+        model: User,
+        as: "assignee",
+        attributes: ["id", "full_name", "email", "role_id"],
+      },
+    ],
+  };
+};
 
 /**
  * Create a new lead
@@ -13,7 +38,7 @@ const createLead = async (req, res) => {
 
     if (!status_id) return resError(res, "status_id is required", 400);
 
-    // Step 1: Create the lead
+    // 1) Create lead
     const lead = await Lead.create({
       first_name,
       last_name,
@@ -23,12 +48,12 @@ const createLead = async (req, res) => {
       country,
       status_id,
       source_id,
-      value_decimal: value_decimal || 0.0,
+      value_decimal: value_decimal ?? 0.0,
       notes,
       created_by: req.user.id,
     });
 
-    // Step 2: Create initial assignment to the creator
+    // 2) Initial assignment to creator
     await LeadAssignment.create({
       lead_id: lead.id,
       assignee_id: req.user.id,
@@ -44,80 +69,62 @@ const createLead = async (req, res) => {
 
 /**
  * Get leads by role with optional filters, pagination, and search
+ * - Admin/Manager: see all; optional filter by current assignee (latest assignment)
+ * - Sales Rep: only leads whose latest assignment is the current user
  */
 const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
     const { status_id, source_id, assignee_id, orderBy, orderDir, search, page = 1, limit = 10 } = req.query;
 
-    let whereClause = {};
+    const where = {};
 
-    // --------------------------
-    // Role-based restrictions
-    // --------------------------
-    if (role === "manager" || role === "admin") {
-      // Managers and Admins can see all leads and filter by assignee
-      if (assignee_id) {
-        whereClause.assignee_id = assignee_id; // Filter by assignee if provided
-      }
-    } else if (role === "sales_rep") {
-      // Sales reps can only see their own leads
-      whereClause.assignee_id = userId;
-    }
+    // Filters on Lead fields
+    if (status_id) where.status_id = status_id;
+    if (source_id) where.source_id = source_id;
 
-    // --------------------------
-    // Filters
-    // --------------------------
-    if (status_id) whereClause.status_id = status_id;
-    if (source_id) whereClause.source_id = source_id;
-
-    // --------------------------
-    // Search (by name/email)
-    // --------------------------
+    // Search
     if (search) {
-      whereClause[Op.or] = [
+      where[Op.or] = [
         { first_name: { [Op.like]: `%${search}%` } },
         { last_name: { [Op.like]: `%${search}%` } },
         { email: { [Op.like]: `%${search}%` } },
       ];
     }
 
-    // --------------------------
     // Ordering
-    // --------------------------
-    let order = [["id", "ASC"]]; // default
+    let order = [["id", "ASC"]];
     if (orderBy) {
-      const direction = orderDir && orderDir.toUpperCase() === "DESC" ? "DESC" : "ASC";
-      order = [[orderBy, direction]];
+      const dir = (orderDir || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC";
+      order = [[orderBy, dir]];
     }
 
-    // --------------------------
     // Pagination
-    // --------------------------
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const pageNum = parseInt(page, 10);
+    const pageLimit = parseInt(limit, 10);
+    const offset = (pageNum - 1) * pageLimit;
+
+    // Role-based scoping via latest assignment
+    // Managers/Admins: see all; apply assignee filter only if provided
+    // Sales reps: restrict to latest assignment = self
+    const latestInclude =
+      role === "sales_rep"
+        ? buildLatestAssignmentInclude(userId) // required join
+        : buildLatestAssignmentInclude(assignee_id || null); // optional join unless filtering
 
     const { count, rows: leads } = await Lead.findAndCountAll({
-      where: whereClause,
+      where,
       include: [
         { model: LeadStatus, attributes: ["id", "value", "label"] },
         { model: LeadSource, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
-        {
-          model: LeadAssignment,
-          include: [
-            {
-              model: User,
-              as: "assignee",
-              attributes: ["id", "full_name", "email"],
-            },
-          ],
-          limit: 1,
-          order: [["assigned_at", "DESC"]],
-        },
+        latestInclude,
       ],
+      distinct: true,
+      col: "id", // ⬅ fix: count DISTINCT on base PK only (avoid 'Lead->lead.id' mismatch)
       order,
-      limit: parseInt(limit),
+      limit: pageLimit,
       offset,
     });
 
@@ -125,9 +132,9 @@ const getLeads = async (req, res) => {
       leads,
       pagination: {
         total: count,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(count / limit),
+        page: pageNum,
+        limit: pageLimit,
+        totalPages: Math.ceil(count / pageLimit),
       },
     });
   } catch (err) {
@@ -149,23 +156,18 @@ const getLeadById = async (req, res) => {
         { model: LeadSource, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
+        // current assignee only (latest assignment)
         {
           model: LeadAssignment,
-          include: [
-            {
-              model: User,
-              as: "assignee",
-              attributes: ["id", "full_name", "email"],
-            },
-          ],
-          limit: 1,
-          order: [["assigned_at", "DESC"]],
+          as: "LeadAssignments",
+          required: false,
+          where: { id: { [Op.in]: LATEST_ASSIGNMENT_IDS } },
+          include: [{ model: User, as: "assignee", attributes: ["id", "full_name", "email"] }],
         },
       ],
     });
 
     if (!lead) return resError(res, "Lead not found", 404);
-
     return resSuccess(res, lead);
   } catch (err) {
     console.error("GetLeadById Error:", err);
@@ -175,6 +177,7 @@ const getLeadById = async (req, res) => {
 
 /**
  * Update lead
+ * - Sales reps may only update leads currently assigned to them (latest assignment)
  */
 const updateLead = async (req, res) => {
   try {
@@ -183,9 +186,16 @@ const updateLead = async (req, res) => {
     const lead = await Lead.findByPk(id);
     if (!lead) return resError(res, "Lead not found", 404);
 
-    // Sales reps can only update status if they are the assignee
-    if (req.user.role === "sales_rep" && lead.assignee_id !== req.user.id) {
-      return resError(res, "Sales rep can only update leads assigned to them", 403);
+    if (req.user.role === "sales_rep") {
+      const latest = await LeadAssignment.findOne({
+        where: { lead_id: id },
+        order: [["id", "DESC"]],
+        attributes: ["assignee_id"],
+      });
+      const currentAssigneeId = latest?.assignee_id ?? null;
+      if (currentAssigneeId !== req.user.id) {
+        return resError(res, "Sales rep can only update leads assigned to them", 403);
+      }
     }
 
     const { first_name, last_name, company, email, phone, country, status_id, source_id, value_decimal, notes } =
@@ -223,7 +233,6 @@ const deleteLead = async (req, res) => {
     if (!lead) return resError(res, "Lead not found", 404);
 
     await lead.destroy();
-
     return resSuccess(res, { message: "Lead deleted successfully" });
   } catch (err) {
     console.error("DeleteLead Error:", err);

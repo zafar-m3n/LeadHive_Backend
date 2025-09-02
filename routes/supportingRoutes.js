@@ -13,6 +13,7 @@ const {
   getManagersForTeam,
   assignManagerToTeam,
   removeManagerFromTeam,
+  getAssignees,
 } = require("../controllers/supportingController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -62,5 +63,8 @@ router.post("/teams/:id/managers", authMiddleware, roleMiddleware(["admin"]), as
 
 // ✅ Remove a manager from a team (Admin only)
 router.delete("/teams/:id/managers/:userId", authMiddleware, roleMiddleware(["admin"]), removeManagerFromTeam);
+
+// ✅ Get all assignable users (managers and sales reps) for tasks and notes (Admin, Manager)
+router.get("/users/assignees", authMiddleware, roleMiddleware(["admin", "manager"]), getAssignees);
 
 module.exports = router;
