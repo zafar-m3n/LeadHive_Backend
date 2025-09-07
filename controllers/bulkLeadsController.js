@@ -222,9 +222,88 @@ const getAssignableTargets = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/v1/leads/bulk-delete
+ * Body: { lead_ids: number[] }
+ *
+ * Rules:
+ *  - admin  -> may delete any of the provided leads
+ *  - manager-> may delete any of the provided leads
+ *  - sales_rep -> forbidden
+ *
+ * Effect:
+ *  - Hard delete leads and their LeadAssignments (no schema change).
+ *  - Returns: { requested, deleted, missing }
+ */
+const bulkDeleteLeads = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { lead_ids = [] } = req.body || {};
+    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep"
+
+    if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
+      await t.rollback();
+      return resError(res, "lead_ids[] is required.", 400);
+    }
+
+    if (actorRole === "sales_rep") {
+      await t.rollback();
+      return resError(res, "Forbidden.", 403);
+    }
+
+    // 1) Load the leads that exist
+    const leads = await Lead.findAll({
+      where: { id: { [Op.in]: lead_ids } },
+      attributes: ["id"],
+      transaction: t,
+    });
+
+    const foundIds = new Set(leads.map((l) => l.id));
+    const missing = lead_ids.filter((id) => !foundIds.has(id));
+
+    if (foundIds.size === 0) {
+      await t.rollback();
+      return resSuccess(res, {
+        requested: lead_ids.length,
+        deleted: 0,
+        missing,
+      });
+    }
+
+    const idsToDelete = [...foundIds];
+
+    // 2) Hard-delete: remove assignments, then leads
+    //    If you have ON DELETE CASCADE on lead_assignments.lead_id, you can omit the first destroy.
+    await LeadAssignment.destroy({
+      where: { lead_id: { [Op.in]: idsToDelete } },
+      transaction: t,
+    });
+
+    const deletedCount = await Lead.destroy({
+      where: { id: { [Op.in]: idsToDelete } },
+      transaction: t,
+    });
+
+    await t.commit();
+
+    return resSuccess(res, {
+      requested: lead_ids.length,
+      deleted: deletedCount,
+      missing,
+    });
+  } catch (err) {
+    console.error("BulkDeleteLeads Error:", err);
+    try {
+      await t.rollback();
+    } catch (_) {}
+    return resError(res, "Bulk delete failed.", 500);
+  }
+};
+
 // --------------------------------------------------------------------------
 
 module.exports = {
   bulkAssign,
   getAssignableTargets,
+  bulkDeleteLeads,
 };
