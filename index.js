@@ -39,6 +39,7 @@ const supportingRoutes = require("./routes/supportingRoutes");
 const leadsUploadRoutes = require("./routes/leadsUploadRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const bulkLeadsRoutes = require("./routes/bulkLeadsRoutes");
+const sourceStatusRoutes = require("./routes/sourceStatusRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
@@ -50,6 +51,7 @@ app.use("/api/v1/supports", supportingRoutes);
 app.use("/api/v1/leads/upload", leadsUploadRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1/bulk", bulkLeadsRoutes);
+app.use("/api/v1/lead", sourceStatusRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {

@@ -1,9 +1,21 @@
-const { Op } = require("sequelize");
-const { Lead, LeadStatus, LeadSource, LeadAssignment, sequelize } = require("../models");
+const { Op, fn, col, where, literal } = require("sequelize");
+const { Lead, LeadStatus, LeadSource, LeadAssignment } = require("../models");
 
-// Simple email validator (enough for imports; lets Sequelize do deeper checks if you keep validate:true)
+// --- helpers ---
 const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const isEmailValid = (e) => SIMPLE_EMAIL_RE.test(e);
+
+const toSnakeValue = (label) => {
+  if (!label) return null;
+  return String(label)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+};
+
+const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32); // cap for safety; compare digits-only
 
 /**
  * Bulk insert leads from frontend-processed file (CSV parsed to JSON).
@@ -11,23 +23,61 @@ const isEmailValid = (e) => SIMPLE_EMAIL_RE.test(e);
  * Rules:
  *  - status fallback -> 'new' (by label or value, case-insensitive)
  *  - source fallback -> 'facebook' (by label or value, case-insensitive)
- *  - duplicate detection -> by email only (skip duplicates; report notes)
+ *  - auto-create unknown sources before inserting leads (value = lower_snake_case(label))
+ *  - duplicate detection -> by email OR phone (digits-only normalization)
  *  - invalid email rows -> SKIP (report notes)
  *  - create initial LeadAssignment to req.user.id for each inserted lead
  */
 const importLeads = async (req, res) => {
-  let t; // for safe rollback in catch
+  let t;
   try {
     const { leads } = req.body;
     if (!Array.isArray(leads) || leads.length === 0) {
       return res.status(400).json({ success: false, error: "No leads provided." });
     }
 
-    // Start transaction using the instance on any model (reliable)
     const sequelizeInstance = Lead.sequelize;
     t = await sequelizeInstance.transaction();
 
-    // -------- preload statuses/sources once
+    // ---- STEP 1: Ensure all referenced sources exist (including default 'facebook')
+    const incomingSourceLabels = new Set();
+    for (const r of leads) {
+      if (r?.source && String(r.source).trim()) {
+        incomingSourceLabels.add(String(r.source).trim());
+      }
+    }
+    // also make sure default source exists for fallback cases
+    incomingSourceLabels.add("facebook");
+
+    if (incomingSourceLabels.size) {
+      // Build rows to upsert/ignore based on current DB
+      const candidateRows = Array.from(incomingSourceLabels)
+        .map((label) => ({
+          value: toSnakeValue(label),
+          label: String(label).trim().slice(0, 80),
+        }))
+        .filter((r) => r.value && r.label);
+
+      // De-dupe in-memory by value
+      const seenVals = new Set();
+      const uniqueRows = [];
+      for (const r of candidateRows) {
+        if (!seenVals.has(r.value)) {
+          seenVals.add(r.value);
+          uniqueRows.push(r);
+        }
+      }
+
+      if (uniqueRows.length) {
+        // Will insert only those not present (needs UNIQUE on lead_sources.value)
+        await LeadSource.bulkCreate(uniqueRows, {
+          ignoreDuplicates: true,
+          transaction: t,
+        });
+      }
+    }
+
+    // ---- STEP 2: Preload statuses/sources once (now that sources are ensured)
     const [statuses, sources] = await Promise.all([
       LeadStatus.findAll({ transaction: t }),
       LeadSource.findAll({ transaction: t }),
@@ -47,34 +97,44 @@ const importLeads = async (req, res) => {
     }
     const defaultSource = sourceMap.get("facebook") || null;
 
-    // -------- normalize inputs; dedupe within incoming file by email ONLY; skip invalid emails
+    // ---- STEP 3: Normalize inputs; in-file duplicate detection by email OR phone
     const prepared = [];
-    const notes = []; // [{ index, email, note }]
+    const notes = []; // [{ index, email?, phone?, note }]
     const seenEmails = new Set();
+    const seenPhones = new Set(); // normalized digits-only
 
     leads.forEach((row, idx) => {
       const r = row || {};
       const email = r.email ? String(r.email).trim().toLowerCase() : null;
+      const phoneRaw = r.phone ? String(r.phone).trim() : null;
+      const phoneNorm = phoneRaw ? normalizePhoneDigits(phoneRaw) : null;
 
-      // Skip invalid email formats entirely
+      // Email format check (if provided)
       if (email && !isEmailValid(email)) {
         notes.push({ index: idx, email, note: "invalid_email_format" });
         return;
       }
 
-      // In-file duplicate check (by email only, and only if email present)
+      // In-file duplicate by email
       if (email && seenEmails.has(email)) {
         notes.push({ index: idx, email, note: "duplicate_email_in_file" });
         return;
       }
       if (email) seenEmails.add(email);
 
-      // resolve status (row.status -> default 'new')
+      // In-file duplicate by phone (digits-only)
+      if (phoneNorm && seenPhones.has(phoneNorm)) {
+        notes.push({ index: idx, phone: phoneRaw, note: "duplicate_phone_in_file" });
+        return;
+      }
+      if (phoneNorm) seenPhones.add(phoneNorm);
+
+      // Resolve status (fallback 'new')
       let st = null;
       if (r.status) st = statusMap.get(String(r.status).trim().toLowerCase());
       if (!st) st = defaultStatus;
 
-      // resolve source (row.source -> default 'facebook')
+      // Resolve source (fallback 'facebook')
       let src = null;
       if (r.source) src = sourceMap.get(String(r.source).trim().toLowerCase());
       if (!src) src = defaultSource;
@@ -91,8 +151,9 @@ const importLeads = async (req, res) => {
         first_name: r.first_name ? String(r.first_name).trim() : null,
         last_name: r.last_name ? String(r.last_name).trim() : null,
         company: r.company ? String(r.company).trim() : null,
-        email, // may be null; duplicates checked only when email present
-        phone: r.phone ? String(r.phone).trim() : null,
+        email, // may be null
+        phone: phoneRaw, // store original raw, compare using normalized set
+        _phoneNorm: phoneNorm, // internal use only
         country: r.country ? String(r.country).trim() : null,
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
@@ -112,21 +173,47 @@ const importLeads = async (req, res) => {
       });
     }
 
-    // -------- DB duplicates by email only (skip rows with an email that already exists)
+    // ---- STEP 4: DB duplicate detection by email OR phone (digits-only)
     const emails = prepared.map((p) => p.email).filter(Boolean);
-    const existing = emails.length
+    const phoneNorms = Array.from(new Set(prepared.map((p) => p._phoneNorm).filter(Boolean)));
+
+    // Build where clause for existing leads
+    const whereClauses = [];
+    if (emails.length) {
+      whereClauses.push({ email: { [Op.in]: emails } });
+    }
+    if (phoneNorms.length) {
+      // MySQL 8+: REGEXP_REPLACE(phone, '[^0-9]', '') IN (:phoneNorms)
+      // Using Sequelize.where + fn to compare normalized DB phone
+      const normalizedDbPhone = fn("REGEXP_REPLACE", col("phone"), "[^0-9]", "");
+      whereClauses.push(where(normalizedDbPhone, { [Op.in]: phoneNorms }));
+    }
+
+    const existing = whereClauses.length
       ? await Lead.findAll({
-          where: { email: { [Op.in]: emails } },
-          attributes: ["email"],
+          where: { [Op.or]: whereClauses },
+          attributes: ["email", "phone"],
           transaction: t,
         })
       : [];
-    const existingEmails = new Set(existing.map((e) => String(e.email).toLowerCase()));
+
+    const existingEmails = new Set(
+      existing
+        .map((e) => e.email)
+        .filter(Boolean)
+        .map((e) => String(e).toLowerCase())
+    );
+
+    const existingPhoneNorms = new Set(existing.map((e) => normalizePhoneDigits(e.phone)).filter(Boolean));
 
     const toInsert = [];
     for (const p of prepared) {
       if (p.email && existingEmails.has(p.email)) {
         notes.push({ index: p._rowIndex, email: p.email, note: "duplicate_email_in_db" });
+        continue;
+      }
+      if (p._phoneNorm && existingPhoneNorms.has(p._phoneNorm)) {
+        notes.push({ index: p._rowIndex, phone: p.phone, note: "duplicate_phone_in_db" });
         continue;
       }
       toInsert.push(p);
@@ -136,18 +223,18 @@ const importLeads = async (req, res) => {
       await t.rollback();
       return res.status(409).json({
         success: false,
-        error: "All rows are duplicates or invalid (by email).",
+        error: "All rows are duplicates or invalid (by email/phone).",
         details: { notes },
       });
     }
 
-    // -------- bulk insert leads
+    // ---- STEP 5: Insert leads
     const createdLeads = await Lead.bulkCreate(
-      toInsert.map(({ _rowIndex, ...rest }) => rest),
+      toInsert.map(({ _rowIndex, _phoneNorm, ...rest }) => rest),
       { validate: true, returning: true, transaction: t }
     );
 
-    // -------- create initial LeadAssignment for each created lead (assign to creator)
+    // ---- STEP 6: Create initial assignments to creator
     if (req.user?.id && createdLeads.length) {
       const assignments = createdLeads.map((l) => ({
         lead_id: l.id,
@@ -165,9 +252,9 @@ const importLeads = async (req, res) => {
       summary: {
         attempted: leads.length,
         inserted: createdLeads.length,
-        duplicates_or_skipped: notes.length, // includes invalid_email_format + dupes
+        duplicates_or_skipped: notes.length,
       },
-      notes, // contains { invalid_email_format, duplicate_email_in_file, duplicate_email_in_db }
+      notes, // includes: invalid_email_format, duplicate_*_in_file, duplicate_*_in_db
       data: createdLeads,
     });
   } catch (err) {
@@ -195,7 +282,7 @@ const getTemplateSchema = async (req, res) => {
         "phone",
         "country",
         "status", // accepts label or value; fallback 'new'
-        "source", // accepts label or value; fallback 'facebook'
+        "source", // accepts label or value; fallback 'facebook' (auto-created if missing)
         "value_decimal",
         "notes",
       ],
@@ -203,11 +290,12 @@ const getTemplateSchema = async (req, res) => {
         status: "new",
         source: "facebook",
       },
-      duplicate_check: "email_only",
+      duplicate_check: "email_or_phone (phone compared by digits-only)",
       notes: [
         "If status is missing or invalid, 'new' is used.",
         "If source is missing or invalid, 'facebook' is used.",
-        "Duplicates are detected by email only.",
+        "Unknown sources are created automatically (value = lowercase_with_underscores, label = original).",
+        "Duplicates are detected by email OR phone; phone is normalized to digits-only for comparison.",
         "Rows with invalid email format are skipped.",
       ],
     });
@@ -217,7 +305,4 @@ const getTemplateSchema = async (req, res) => {
   }
 };
 
-module.exports = {
-  importLeads,
-  getTemplateSchema,
-};
+module.exports = { importLeads, getTemplateSchema };
