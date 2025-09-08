@@ -7,15 +7,27 @@ const { resSuccess, resError } = require("../utils/responseUtil");
 /** Subquery: latest LeadAssignment row id per lead */
 const LATEST_ASSIGNMENT_IDS = literal(`(SELECT MAX(id) FROM lead_assignments GROUP BY lead_id)`);
 
-/** Build include that joins ONLY the latest assignment per lead; optionally filter by assignee_id */
-const buildLatestAssignmentInclude = (assigneeId = null) => {
+/** Build include that joins ONLY the latest assignment per lead; optionally filter by assignee_id and/or assigned_at range */
+const buildLatestAssignmentInclude = (
+  assigneeId = null,
+  assignedFrom = null,
+  assignedTo = null,
+  forceRequired = false
+) => {
   const where = { id: { [Op.in]: LATEST_ASSIGNMENT_IDS } };
+
   if (assigneeId) where.assignee_id = Number(assigneeId);
+
+  if (assignedFrom || assignedTo) {
+    where.assigned_at = {};
+    if (assignedFrom) where.assigned_at[Op.gte] = assignedFrom;
+    if (assignedTo) where.assigned_at[Op.lte] = assignedTo;
+  }
 
   return {
     model: LeadAssignment,
     as: "LeadAssignments",
-    required: !!assigneeId, // require join only if scoping by assignee
+    required: forceRequired || !!assigneeId || !!(assignedFrom || assignedTo),
     where,
     include: [
       {
@@ -68,14 +80,30 @@ const createLead = async (req, res) => {
 };
 
 /**
- * Get leads by role with optional filters, pagination, and search
- * - Admin/Manager: see all; optional filter by current assignee (latest assignment)
- * - Sales Rep: only leads whose latest assignment is the current user
+ * Get leads by role with optional filters, pagination, search, and date-assigned range
+ * - Admin/Manager: see all; optional filter by current assignee (latest assignment) and/or assigned_at range
+ * - Sales Rep: only leads whose latest assignment is the current user; may also filter by assigned_at range
+ * Query params:
+ *  - status_id, source_id, assignee_id
+ *  - search, orderBy, orderDir
+ *  - page=1, limit=10
+ *  - assigned_from=YYYY-MM-DD, assigned_to=YYYY-MM-DD   (both inclusive)
  */
 const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
-    const { status_id, source_id, assignee_id, orderBy, orderDir, search, page = 1, limit = 10 } = req.query;
+    const {
+      status_id,
+      source_id,
+      assignee_id,
+      orderBy,
+      orderDir,
+      search,
+      page = 1,
+      limit = 10,
+      assigned_from,
+      assigned_to,
+    } = req.query;
 
     const where = {};
 
@@ -92,11 +120,34 @@ const getLeads = async (req, res) => {
       ];
     }
 
+    // Parse date range (inclusive day bounds)
+    let assignedFrom = null;
+    let assignedTo = null;
+    if (assigned_from) {
+      const d = new Date(assigned_from);
+      if (!isNaN(d)) {
+        // start of day UTC
+        assignedFrom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+      }
+    }
+    if (assigned_to) {
+      const d = new Date(assigned_to);
+      if (!isNaN(d)) {
+        // end of day UTC
+        assignedTo = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
+      }
+    }
+
     // Ordering
     let order = [["id", "ASC"]];
     if (orderBy) {
       const dir = (orderDir || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC";
-      order = [[orderBy, dir]];
+      if (orderBy === "assigned_at") {
+        // sort by latest assignment timestamp
+        order = [[{ model: LeadAssignment, as: "LeadAssignments" }, "assigned_at", dir]];
+      } else {
+        order = [[orderBy, dir]];
+      }
     }
 
     // Pagination
@@ -104,13 +155,14 @@ const getLeads = async (req, res) => {
     const pageLimit = parseInt(limit, 10);
     const offset = (pageNum - 1) * pageLimit;
 
-    // Role-based scoping via latest assignment
-    // Managers/Admins: see all; apply assignee filter only if provided
-    // Sales reps: restrict to latest assignment = self
+    // Role-based scoping via latest assignment:
+    // - Sales reps: restrict to latest assignment = self (required join)
+    // - Admin/Managers: optional join, but becomes required if assignee filter OR date filter present
+    const needDateFilter = !!(assignedFrom || assignedTo);
     const latestInclude =
       role === "sales_rep"
-        ? buildLatestAssignmentInclude(userId) // required join
-        : buildLatestAssignmentInclude(assignee_id || null); // optional join unless filtering
+        ? buildLatestAssignmentInclude(userId, assignedFrom, assignedTo, true)
+        : buildLatestAssignmentInclude(assignee_id || null, assignedFrom, assignedTo, needDateFilter || !!assignee_id);
 
     const { count, rows: leads } = await Lead.findAndCountAll({
       where,
@@ -122,7 +174,7 @@ const getLeads = async (req, res) => {
         latestInclude,
       ],
       distinct: true,
-      col: "id", // ⬅ fix: count DISTINCT on base PK only (avoid 'Lead->lead.id' mismatch)
+      col: "id", // count DISTINCT on base PK only
       order,
       limit: pageLimit,
       offset,
