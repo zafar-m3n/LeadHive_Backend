@@ -1,9 +1,14 @@
-const { Op, fn, col, where, literal } = require("sequelize");
+const { Op, fn, col, where } = require("sequelize");
+const validator = require("validator");
 const { Lead, LeadStatus, LeadSource, LeadAssignment } = require("../models");
 
 // --- helpers ---
-const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const isEmailValid = (e) => SIMPLE_EMAIL_RE.test(e);
+const sanitizeStr = (v) =>
+  v === undefined || v === null
+    ? ""
+    : String(v)
+        .replace(/\u00A0/g, " ")
+        .trim();
 
 const toSnakeValue = (label) => {
   if (!label) return null;
@@ -15,17 +20,16 @@ const toSnakeValue = (label) => {
     .slice(0, 40);
 };
 
-const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32); // cap for safety; compare digits-only
+const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").slice(0, 32); // digits-only, capped
 
 /**
  * Bulk insert leads from frontend-processed file (CSV parsed to JSON).
  * Body: { leads: [ { first_name?, last_name?, company?, email?, phone?, country?, status?, source?, value_decimal?, notes? } ] }
  * Rules:
  *  - status fallback -> 'new' (by label or value, case-insensitive)
- *  - source fallback -> 'facebook' (by label or value, case-insensitive)
- *  - auto-create unknown sources before inserting leads (value = lower_snake_case(label))
+ *  - source fallback -> 'facebook' (by label or value, case-insensitive) and auto-create unknown sources
  *  - duplicate detection -> by email OR phone (digits-only normalization)
- *  - invalid email rows -> SKIP (report notes)
+ *  - invalid email rows -> SKIP (record note)
  *  - create initial LeadAssignment to req.user.id for each inserted lead
  */
 const importLeads = async (req, res) => {
@@ -42,15 +46,12 @@ const importLeads = async (req, res) => {
     // ---- STEP 1: Ensure all referenced sources exist (including default 'facebook')
     const incomingSourceLabels = new Set();
     for (const r of leads) {
-      if (r?.source && String(r.source).trim()) {
-        incomingSourceLabels.add(String(r.source).trim());
-      }
+      const src = sanitizeStr(r?.source);
+      if (src) incomingSourceLabels.add(src);
     }
-    // also make sure default source exists for fallback cases
     incomingSourceLabels.add("facebook");
 
     if (incomingSourceLabels.size) {
-      // Build rows to upsert/ignore based on current DB
       const candidateRows = Array.from(incomingSourceLabels)
         .map((label) => ({
           value: toSnakeValue(label),
@@ -58,7 +59,6 @@ const importLeads = async (req, res) => {
         }))
         .filter((r) => r.value && r.label);
 
-      // De-dupe in-memory by value
       const seenVals = new Set();
       const uniqueRows = [];
       for (const r of candidateRows) {
@@ -69,7 +69,6 @@ const importLeads = async (req, res) => {
       }
 
       if (uniqueRows.length) {
-        // Will insert only those not present (needs UNIQUE on lead_sources.value)
         await LeadSource.bulkCreate(uniqueRows, {
           ignoreDuplicates: true,
           transaction: t,
@@ -85,15 +84,15 @@ const importLeads = async (req, res) => {
 
     const statusMap = new Map();
     for (const s of statuses) {
-      if (s.label) statusMap.set(String(s.label).trim().toLowerCase(), s);
-      if (s.value) statusMap.set(String(s.value).trim().toLowerCase(), s);
+      if (s.label) statusMap.set(sanitizeStr(s.label).toLowerCase(), s);
+      if (s.value) statusMap.set(sanitizeStr(s.value).toLowerCase(), s);
     }
     const defaultStatus = statusMap.get("new") || null;
 
     const sourceMap = new Map();
     for (const s of sources) {
-      if (s.label) sourceMap.set(String(s.label).trim().toLowerCase(), s);
-      if (s.value) sourceMap.set(String(s.value).trim().toLowerCase(), s);
+      if (s.label) sourceMap.set(sanitizeStr(s.label).toLowerCase(), s);
+      if (s.value) sourceMap.set(sanitizeStr(s.value).toLowerCase(), s);
     }
     const defaultSource = sourceMap.get("facebook") || null;
 
@@ -105,14 +104,18 @@ const importLeads = async (req, res) => {
 
     leads.forEach((row, idx) => {
       const r = row || {};
-      const email = r.email ? String(r.email).trim().toLowerCase() : null;
-      const phoneRaw = r.phone ? String(r.phone).trim() : null;
+
+      // sanitize & normalize fields
+      let email = sanitizeStr(r.email).toLowerCase();
+      if (email === "") email = null; // treat empty as null
+
+      const phoneRaw = sanitizeStr(r.phone) || null;
       const phoneNorm = phoneRaw ? normalizePhoneDigits(phoneRaw) : null;
 
-      // Email format check (if provided)
-      if (email && !isEmailValid(email)) {
+      // Email format check (if provided) — use validator.js (same as Sequelize)
+      if (email && !validator.isEmail(email)) {
         notes.push({ index: idx, email, note: "invalid_email_format" });
-        return;
+        return; // SKIP this row as requested
       }
 
       // In-file duplicate by email
@@ -131,34 +134,36 @@ const importLeads = async (req, res) => {
 
       // Resolve status (fallback 'new')
       let st = null;
-      if (r.status) st = statusMap.get(String(r.status).trim().toLowerCase());
+      const rStatus = sanitizeStr(r.status).toLowerCase();
+      if (rStatus) st = statusMap.get(rStatus);
       if (!st) st = defaultStatus;
 
       // Resolve source (fallback 'facebook')
       let src = null;
-      if (r.source) src = sourceMap.get(String(r.source).trim().toLowerCase());
+      const rSource = sanitizeStr(r.source).toLowerCase();
+      if (rSource) src = sourceMap.get(rSource);
       if (!src) src = defaultSource;
 
       // value_decimal normalization
       let valueDecimal = 0;
-      if (r.value_decimal !== undefined && r.value_decimal !== null && r.value_decimal !== "") {
+      if (r.value_decimal !== undefined && r.value_decimal !== null && String(r.value_decimal) !== "") {
         const num = Number(r.value_decimal);
         valueDecimal = Number.isFinite(num) ? num : 0;
       }
 
       prepared.push({
         _rowIndex: idx,
-        first_name: r.first_name ? String(r.first_name).trim() : null,
-        last_name: r.last_name ? String(r.last_name).trim() : null,
-        company: r.company ? String(r.company).trim() : null,
+        first_name: sanitizeStr(r.first_name) || null,
+        last_name: sanitizeStr(r.last_name) || null,
+        company: sanitizeStr(r.company) || null,
         email, // may be null
         phone: phoneRaw, // store original raw, compare using normalized set
         _phoneNorm: phoneNorm, // internal use only
-        country: r.country ? String(r.country).trim() : null,
+        country: sanitizeStr(r.country) || null,
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
         value_decimal: valueDecimal,
-        notes: r.notes ? String(r.notes).trim() : null,
+        notes: sanitizeStr(r.notes) || null,
         created_by: req.user?.id || null,
         updated_by: req.user?.id || null,
       });
@@ -177,14 +182,12 @@ const importLeads = async (req, res) => {
     const emails = prepared.map((p) => p.email).filter(Boolean);
     const phoneNorms = Array.from(new Set(prepared.map((p) => p._phoneNorm).filter(Boolean)));
 
-    // Build where clause for existing leads
     const whereClauses = [];
     if (emails.length) {
       whereClauses.push({ email: { [Op.in]: emails } });
     }
     if (phoneNorms.length) {
       // MySQL 8+: REGEXP_REPLACE(phone, '[^0-9]', '') IN (:phoneNorms)
-      // Using Sequelize.where + fn to compare normalized DB phone
       const normalizedDbPhone = fn("REGEXP_REPLACE", col("phone"), "[^0-9]", "");
       whereClauses.push(where(normalizedDbPhone, { [Op.in]: phoneNorms }));
     }
