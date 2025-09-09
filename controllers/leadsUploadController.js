@@ -1,6 +1,6 @@
 const { Op, fn, col, where } = require("sequelize");
 const validator = require("validator");
-const { Lead, LeadStatus, LeadSource, LeadAssignment } = require("../models");
+const { Lead, LeadStatus, LeadSource, LeadAssignment, LeadNote } = require("../models");
 
 // --- helpers ---
 const sanitizeStr = (v) =>
@@ -31,6 +31,7 @@ const normalizePhoneDigits = (p) => (p ? String(p) : "").replace(/\D+/g, "").sli
  *  - duplicate detection -> by email OR phone (digits-only normalization)
  *  - invalid email rows -> SKIP (record note)
  *  - create initial LeadAssignment to req.user.id for each inserted lead
+ *  - if a row includes "notes", it becomes an initial LeadNote authored by the importing user
  */
 const importLeads = async (req, res) => {
   let t;
@@ -112,7 +113,7 @@ const importLeads = async (req, res) => {
       const phoneRaw = sanitizeStr(r.phone) || null;
       const phoneNorm = phoneRaw ? normalizePhoneDigits(phoneRaw) : null;
 
-      // Email format check (if provided) — use validator.js (same as Sequelize)
+      // Email format check (if provided)
       if (email && !validator.isEmail(email)) {
         notes.push({ index: idx, email, note: "invalid_email_format" });
         return; // SKIP this row as requested
@@ -151,6 +152,7 @@ const importLeads = async (req, res) => {
         valueDecimal = Number.isFinite(num) ? num : 0;
       }
 
+      const noteBody = sanitizeStr(r.notes);
       prepared.push({
         _rowIndex: idx,
         first_name: sanitizeStr(r.first_name) || null,
@@ -163,7 +165,7 @@ const importLeads = async (req, res) => {
         status_id: st ? st.id : null,
         source_id: src ? src.id : null,
         value_decimal: valueDecimal,
-        notes: sanitizeStr(r.notes) || null,
+        _noteBody: noteBody, // keep separate; will become LeadNote later
         created_by: req.user?.id || null,
         updated_by: req.user?.id || null,
       });
@@ -231,9 +233,9 @@ const importLeads = async (req, res) => {
       });
     }
 
-    // ---- STEP 5: Insert leads
+    // ---- STEP 5: Insert leads (omit internals and _noteBody)
     const createdLeads = await Lead.bulkCreate(
-      toInsert.map(({ _rowIndex, _phoneNorm, ...rest }) => rest),
+      toInsert.map(({ _rowIndex, _phoneNorm, _noteBody, ...rest }) => rest),
       { validate: true, returning: true, transaction: t }
     );
 
@@ -245,6 +247,23 @@ const importLeads = async (req, res) => {
         assigned_by: req.user.id,
       }));
       await LeadAssignment.bulkCreate(assignments, { transaction: t });
+    }
+
+    // ---- STEP 7: Create initial LeadNotes (if provided per row)
+    // Map in-order: createdLeads[i] corresponds to toInsert[i]
+    const notesPayload = [];
+    for (let i = 0; i < createdLeads.length; i++) {
+      const noteBody = toInsert[i]._noteBody;
+      if (typeof noteBody === "string" && noteBody.trim().length > 0) {
+        notesPayload.push({
+          lead_id: createdLeads[i].id,
+          author_id: req.user?.id || null,
+          body: noteBody.trim(),
+        });
+      }
+    }
+    if (notesPayload.length) {
+      await LeadNote.bulkCreate(notesPayload, { transaction: t });
     }
 
     await t.commit();
@@ -287,7 +306,7 @@ const getTemplateSchema = async (req, res) => {
         "status", // accepts label or value; fallback 'new'
         "source", // accepts label or value; fallback 'facebook' (auto-created if missing)
         "value_decimal",
-        "notes",
+        "notes", // optional: becomes an initial note attached to the lead (authored by the importing user)
       ],
       defaults: {
         status: "new",
@@ -300,6 +319,7 @@ const getTemplateSchema = async (req, res) => {
         "Unknown sources are created automatically (value = lowercase_with_underscores, label = original).",
         "Duplicates are detected by email OR phone; phone is normalized to digits-only for comparison.",
         "Rows with invalid email format are skipped.",
+        "If a row includes 'notes', it is saved as the first note on that lead.",
       ],
     });
   } catch (err) {

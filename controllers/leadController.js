@@ -1,7 +1,15 @@
 "use strict";
 
 const { Op, literal } = require("sequelize");
-const { Lead, LeadStatus, LeadSource, User, LeadAssignment } = require("../models");
+const {
+  Lead,
+  LeadStatus,
+  LeadSource,
+  User,
+  LeadAssignment,
+  LeadNote, // NEW: for multi-notes
+} = require("../models");
+const { sequelize } = require("../config/database");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
 /** Subquery: latest LeadAssignment row id per lead */
@@ -42,39 +50,66 @@ const buildLatestAssignmentInclude = (
 /**
  * Create a new lead
  * Body: { first_name?, last_name?, company?, email?, phone?, country?, status_id, source_id?, value_decimal?, notes? }
+ * - If 'notes' is provided (non-empty string), a LeadNote is created with author = req.user.id
+ * - Initial assignment is created to the creator
  */
 const createLead = async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const { first_name, last_name, company, email, phone, country, status_id, source_id, value_decimal, notes } =
       req.body;
 
-    if (!status_id) return resError(res, "status_id is required", 400);
+    if (!status_id) {
+      await t.rollback();
+      return resError(res, "status_id is required", 400);
+    }
 
     // 1) Create lead
-    const lead = await Lead.create({
-      first_name,
-      last_name,
-      company,
-      email,
-      phone,
-      country,
-      status_id,
-      source_id,
-      value_decimal: value_decimal ?? 0.0,
-      notes,
-      created_by: req.user.id,
-    });
+    const lead = await Lead.create(
+      {
+        first_name,
+        last_name,
+        company,
+        email,
+        phone,
+        country,
+        status_id,
+        source_id,
+        value_decimal: value_decimal ?? 0.0,
+        created_by: req.user.id,
+      },
+      { transaction: t }
+    );
 
     // 2) Initial assignment to creator
-    await LeadAssignment.create({
-      lead_id: lead.id,
-      assignee_id: req.user.id,
-      assigned_by: req.user.id,
-    });
+    await LeadAssignment.create(
+      {
+        lead_id: lead.id,
+        assignee_id: req.user.id,
+        assigned_by: req.user.id,
+      },
+      { transaction: t }
+    );
 
+    // 3) Optional: create initial note (back-compat for clients still sending "notes")
+    if (typeof notes === "string" && notes.trim().length > 0) {
+      await LeadNote.create(
+        {
+          lead_id: lead.id,
+          author_id: req.user.id,
+          body: notes.trim(),
+        },
+        { transaction: t }
+      );
+    }
+
+    await t.commit();
     return resSuccess(res, lead, 201);
   } catch (err) {
     console.error("CreateLead Error:", err);
+    try {
+      await t.rollback();
+    } catch (_) {}
     return resError(res, "Internal server error", 500);
   }
 };
@@ -174,7 +209,7 @@ const getLeads = async (req, res) => {
         latestInclude,
       ],
       distinct: true,
-      col: "id", // count DISTINCT on base PK only
+      col: "id",
       order,
       limit: pageLimit,
       offset,
@@ -196,7 +231,7 @@ const getLeads = async (req, res) => {
 };
 
 /**
- * Get single lead by ID (with current assignee)
+ * Get single lead by ID (with current assignee + notes with author)
  */
 const getLeadById = async (req, res) => {
   try {
@@ -208,13 +243,20 @@ const getLeadById = async (req, res) => {
         { model: LeadSource, attributes: ["id", "value", "label"] },
         { model: User, as: "creator", attributes: ["id", "full_name", "email"] },
         { model: User, as: "updater", attributes: ["id", "full_name", "email"] },
-        // current assignee only (latest assignment)
         {
           model: LeadAssignment,
           as: "LeadAssignments",
           required: false,
           where: { id: { [Op.in]: LATEST_ASSIGNMENT_IDS } },
           include: [{ model: User, as: "assignee", attributes: ["id", "full_name", "email"] }],
+        },
+        {
+          model: LeadNote,
+          as: "notes",
+          required: false,
+          separate: true,
+          include: [{ model: User, as: "author", attributes: ["id", "full_name", "email"] }],
+          order: [["created_at", "DESC"]],
         },
       ],
     });
@@ -230,22 +272,29 @@ const getLeadById = async (req, res) => {
 /**
  * Update lead
  * - Sales reps may only update leads currently assigned to them (latest assignment)
+ * - If request contains "notes" (non-empty string), append a new LeadNote (author = current user)
  */
 const updateLead = async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const { id } = req.params;
 
-    const lead = await Lead.findByPk(id);
-    if (!lead) return resError(res, "Lead not found", 404);
+    const lead = await Lead.findByPk(id, { transaction: t });
+    if (!lead) {
+      await t.rollback();
+      return resError(res, "Lead not found", 404);
+    }
 
     if (req.user.role === "sales_rep") {
       const latest = await LeadAssignment.findOne({
         where: { lead_id: id },
         order: [["id", "DESC"]],
         attributes: ["assignee_id"],
+        transaction: t,
       });
       const currentAssigneeId = latest?.assignee_id ?? null;
       if (currentAssigneeId !== req.user.id) {
+        await t.rollback();
         return resError(res, "Sales rep can only update leads assigned to them", 403);
       }
     }
@@ -262,14 +311,28 @@ const updateLead = async (req, res) => {
     if (status_id !== undefined) lead.status_id = status_id;
     if (source_id !== undefined) lead.source_id = source_id;
     if (value_decimal !== undefined) lead.value_decimal = value_decimal;
-    if (notes !== undefined) lead.notes = notes;
 
     lead.updated_by = req.user.id;
-    await lead.save();
+    await lead.save({ transaction: t });
 
+    if (typeof notes === "string" && notes.trim().length > 0) {
+      await LeadNote.create(
+        {
+          lead_id: lead.id,
+          author_id: req.user.id,
+          body: notes.trim(),
+        },
+        { transaction: t }
+      );
+    }
+
+    await t.commit();
     return resSuccess(res, lead);
   } catch (err) {
     console.error("UpdateLead Error:", err);
+    try {
+      await t.rollback();
+    } catch (_) {}
     return resError(res, "Internal server error", 500);
   }
 };
