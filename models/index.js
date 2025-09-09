@@ -4,10 +4,11 @@ const LeadSource = require("./LeadSource");
 const User = require("./User");
 const Team = require("./Team");
 const TeamMember = require("./TeamMember");
+const TeamManager = require("./TeamManager");
 const Lead = require("./Lead");
 const LeadAssignment = require("./LeadAssignment");
 const SavedFilter = require("./SavedFilter");
-const TeamManager = require("./TeamManager");
+const LeadNote = require("./LeadNote");
 
 // =============================
 // Associations
@@ -17,7 +18,7 @@ const TeamManager = require("./TeamManager");
 Role.hasMany(User, { foreignKey: "role_id" });
 User.belongsTo(Role, { foreignKey: "role_id" });
 
-// --- Teams & Users ---
+// --- Teams & Users (Managers M2M) ---
 Team.belongsToMany(User, {
   through: TeamManager,
   as: "managers",
@@ -31,7 +32,7 @@ User.belongsToMany(Team, {
   otherKey: "team_id",
 });
 
-// --- Team Members (many-to-many between Teams and Users) ---
+// --- Teams & Users (Members M2M) ---
 Team.belongsToMany(User, {
   through: TeamMember,
   as: "members",
@@ -73,6 +74,13 @@ LeadAssignment.belongsTo(User, { foreignKey: "assigned_by", as: "assigner" });
 User.hasMany(SavedFilter, { foreignKey: "user_id" });
 SavedFilter.belongsTo(User, { foreignKey: "user_id" });
 
+// --- Lead Notes (NEW) ---
+Lead.hasMany(LeadNote, { foreignKey: "lead_id", as: "notes" });
+LeadNote.belongsTo(Lead, { foreignKey: "lead_id" });
+
+User.hasMany(LeadNote, { foreignKey: "author_id", as: "authoredNotes" });
+LeadNote.belongsTo(User, { foreignKey: "author_id", as: "author" });
+
 // =============================
 // Export all models
 // =============================
@@ -83,8 +91,9 @@ module.exports = {
   User,
   Team,
   TeamMember,
+  TeamManager,
   Lead,
   LeadAssignment,
   SavedFilter,
-  TeamManager,
+  LeadNote,
 };

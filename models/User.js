@@ -12,10 +12,7 @@ const User = sequelize.define(
     role_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      references: {
-        model: "roles",
-        key: "id",
-      },
+      references: { model: "roles", key: "id" },
     },
     full_name: {
       type: DataTypes.STRING(120),
@@ -25,9 +22,7 @@ const User = sequelize.define(
       type: DataTypes.STRING(160),
       allowNull: false,
       unique: true,
-      validate: {
-        isEmail: true,
-      },
+      validate: { isEmail: true },
     },
     password_hash: {
       type: DataTypes.STRING(255),

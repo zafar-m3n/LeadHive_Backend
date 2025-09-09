@@ -24,9 +24,7 @@ const Lead = sequelize.define(
     email: {
       type: DataTypes.STRING(160),
       allowNull: true,
-      validate: {
-        isEmail: true,
-      },
+      validate: { isEmail: true },
     },
     phone: {
       type: DataTypes.STRING(40),
@@ -39,43 +37,27 @@ const Lead = sequelize.define(
     status_id: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      references: {
-        model: "lead_statuses",
-        key: "id",
-      },
+      references: { model: "lead_statuses", key: "id" },
     },
     source_id: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      references: {
-        model: "lead_sources",
-        key: "id",
-      },
+      references: { model: "lead_sources", key: "id" },
     },
     value_decimal: {
       type: DataTypes.DECIMAL(12, 2),
       allowNull: false,
       defaultValue: 0.0,
     },
-    notes: {
-      type: DataTypes.TEXT,
-      allowNull: true,
-    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      references: {
-        model: "users",
-        key: "id",
-      },
+      references: { model: "users", key: "id" },
     },
     updated_by: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      references: {
-        model: "users",
-        key: "id",
-      },
+      references: { model: "users", key: "id" },
     },
     created_at: {
       type: DataTypes.DATE,
