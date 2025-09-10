@@ -167,7 +167,7 @@ const bulkAssign = async (req, res) => {
 /**
  * GET /api/v1/leads/assignable-targets
  * Return only valid targets for the actor:
- *  - admin: active managers
+ *  - admin: active users
  *  - manager: active sales reps in any of their managed teams
  */
 const getAssignableTargets = async (req, res) => {
@@ -176,13 +176,13 @@ const getAssignableTargets = async (req, res) => {
     const role = req.user?.role;
 
     if (role === "admin") {
-      const managers = await User.findAll({
+      const users = await User.findAll({
         where: { is_active: true },
-        include: [{ model: Role, where: { value: "manager" }, attributes: [] }],
+        include: [{ model: Role, attributes: [] }],
         attributes: ["id", "full_name", "email"],
         order: [["full_name", "ASC"]],
       });
-      return resSuccess(res, { role: "admin", targets: managers });
+      return resSuccess(res, { role: "admin", targets: users });
     }
 
     if (role === "manager") {
