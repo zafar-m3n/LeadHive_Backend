@@ -148,11 +148,21 @@ const getLeads = async (req, res) => {
 
     // Search
     if (search) {
-      where[Op.or] = [
+      const digitsOnly = String(search).replace(/\D+/g, "");
+      const orClauses = [
         { first_name: { [Op.like]: `%${search}%` } },
         { last_name: { [Op.like]: `%${search}%` } },
         { email: { [Op.like]: `%${search}%` } },
+        { phone: { [Op.like]: `%${search}%` } }, // general phone substring
       ];
+
+      // If user typed a short numeric tail (e.g., last 5 digits), also match phones that end with it
+      if (digitsOnly.length >= 3 && digitsOnly.length <= 5) {
+        // Suffix match; works even if there are separators in stored phone
+        orClauses.push({ phone: { [Op.like]: `%${digitsOnly}` } });
+      }
+
+      where[Op.or] = orClauses;
     }
 
     // Parse date range (inclusive day bounds)
