@@ -129,7 +129,7 @@ const getLeads = async (req, res) => {
     const { role, id: userId } = req.user;
     const {
       status_id,
-      source_id,
+      source_ids, // <-- comma-separated string of IDs
       assignee_id,
       orderBy,
       orderDir,
@@ -142,9 +142,19 @@ const getLeads = async (req, res) => {
 
     const where = {};
 
-    // Filters on Lead fields
+    // Status filter
     if (status_id) where.status_id = status_id;
-    if (source_id) where.source_id = source_id;
+
+    // Multi-source filter (comma separated string)
+    if (source_ids) {
+      const ids = source_ids
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (ids.length > 0) {
+        where.source_id = { [Op.in]: ids };
+      }
+    }
 
     // Search
     if (search) {
@@ -153,32 +163,26 @@ const getLeads = async (req, res) => {
         { first_name: { [Op.like]: `%${search}%` } },
         { last_name: { [Op.like]: `%${search}%` } },
         { email: { [Op.like]: `%${search}%` } },
-        { phone: { [Op.like]: `%${search}%` } }, // general phone substring
+        { phone: { [Op.like]: `%${search}%` } },
       ];
-
-      // If user typed a short numeric tail (e.g., last 5 digits), also match phones that end with it
       if (digitsOnly.length >= 3 && digitsOnly.length <= 5) {
-        // Suffix match; works even if there are separators in stored phone
         orClauses.push({ phone: { [Op.like]: `%${digitsOnly}` } });
       }
-
       where[Op.or] = orClauses;
     }
 
-    // Parse date range (inclusive day bounds)
+    // Parse date range
     let assignedFrom = null;
     let assignedTo = null;
     if (assigned_from) {
       const d = new Date(assigned_from);
       if (!isNaN(d)) {
-        // start of day UTC
         assignedFrom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
       }
     }
     if (assigned_to) {
       const d = new Date(assigned_to);
       if (!isNaN(d)) {
-        // end of day UTC
         assignedTo = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999));
       }
     }
@@ -188,7 +192,6 @@ const getLeads = async (req, res) => {
     if (orderBy) {
       const dir = (orderDir || "ASC").toUpperCase() === "DESC" ? "DESC" : "ASC";
       if (orderBy === "assigned_at") {
-        // sort by latest assignment timestamp
         order = [[{ model: LeadAssignment, as: "LeadAssignments" }, "assigned_at", dir]];
       } else {
         order = [[orderBy, dir]];
@@ -200,9 +203,7 @@ const getLeads = async (req, res) => {
     const pageLimit = parseInt(limit, 10);
     const offset = (pageNum - 1) * pageLimit;
 
-    // Role-based scoping via latest assignment:
-    // - Sales reps: restrict to latest assignment = self (required join)
-    // - Admin/Managers: optional join, but becomes required if assignee filter OR date filter present
+    // Role-based scoping
     const needDateFilter = !!(assignedFrom || assignedTo);
     const latestInclude =
       role === "sales_rep"
