@@ -128,7 +128,7 @@ const getLeads = async (req, res) => {
   try {
     const { role, id: userId } = req.user;
     const {
-      status_id,
+      status_ids,
       source_ids, // <-- comma-separated string of IDs
       assignee_id,
       orderBy,
@@ -143,7 +143,15 @@ const getLeads = async (req, res) => {
     const where = {};
 
     // Status filter
-    if (status_id) where.status_id = status_id;
+    if (status_ids) {
+      const ids = status_ids
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (ids.length > 0) {
+        where.status_id = { [Op.in]: ids };
+      }
+    }
 
     // Multi-source filter (comma separated string)
     if (source_ids) {
