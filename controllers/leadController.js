@@ -1,5 +1,3 @@
-"use strict";
-
 const { Op, literal } = require("sequelize");
 const {
   Lead,
@@ -93,7 +91,7 @@ const createLead = async (req, res) => {
 
     // 3) Optional: create initial note (back-compat for clients still sending "notes")
     if (typeof notes === "string" && notes.trim().length > 0) {
-      await LeadNote.create(
+      const note = await LeadNote.create(
         {
           lead_id: lead.id,
           author_id: req.user.id,
@@ -101,6 +99,8 @@ const createLead = async (req, res) => {
         },
         { transaction: t }
       );
+
+      await lead.update({ updated_at: note.created_at }, { transaction: t });
     }
 
     await t.commit();
@@ -335,7 +335,7 @@ const updateLead = async (req, res) => {
     await lead.save({ transaction: t });
 
     if (typeof notes === "string" && notes.trim().length > 0) {
-      await LeadNote.create(
+      const note = await LeadNote.create(
         {
           lead_id: lead.id,
           author_id: req.user.id,
@@ -343,6 +343,8 @@ const updateLead = async (req, res) => {
         },
         { transaction: t }
       );
+
+      await lead.update({ updated_at: note.created_at }, { transaction: t });
     }
 
     await t.commit();
