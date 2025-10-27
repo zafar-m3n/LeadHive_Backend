@@ -10,6 +10,7 @@ const {
   deleteLead,
   assignLead,
   getLeadAssignments,
+  deleteLeadNote,
 } = require("../controllers/leadController");
 
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -36,5 +37,6 @@ router.post("/", roleMiddleware(["admin", "manager"]), createLead);
 router.put("/:id", roleMiddleware(["admin", "manager", "sales_rep"]), updateLead);
 router.delete("/:id", roleMiddleware(["admin", "manager"]), deleteLead);
 router.post("/:id/assign", roleMiddleware(["admin", "manager"]), assignLead);
+router.delete("/:leadId/notes/:noteId", roleMiddleware(["admin", "manager", "sales_rep"]), deleteLeadNote);
 
 module.exports = router;

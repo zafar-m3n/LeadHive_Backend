@@ -430,6 +430,37 @@ const getLeadAssignments = async (req, res) => {
   }
 };
 
+/**
+ * Delete a specific note for a lead
+ * Only Admins and Managers are allowed to perform this action
+ */
+const deleteLeadNote = async (req, res) => {
+  try {
+    const { leadId, noteId } = req.params;
+    const { role } = req.user;
+
+    // Only admins and managers can delete notes
+    if (role !== "admin" && role !== "manager") {
+      return resError(res, "You are not authorized to delete notes.", 403);
+    }
+
+    // Verify note exists and belongs to the given lead
+    const note = await LeadNote.findOne({
+      where: { id: noteId, lead_id: leadId },
+    });
+
+    if (!note) {
+      return resError(res, "Note not found.", 404);
+    }
+
+    await note.destroy();
+    return resSuccess(res, { message: "Note deleted successfully." });
+  } catch (err) {
+    console.error("DeleteLeadNote Error:", err);
+    return resError(res, "Internal server error", 500);
+  }
+};
+
 // =============================
 // Exports
 // =============================
@@ -441,4 +472,5 @@ module.exports = {
   deleteLead,
   assignLead,
   getLeadAssignments,
+  deleteLeadNote,
 };
