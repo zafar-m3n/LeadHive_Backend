@@ -67,7 +67,7 @@ async function getLatestAssignmentsMap(leadIds) {
  * POST /api/v1/leads/bulk-assign
  * Body: { lead_ids: number[], assignee_id: number, overwrite?: boolean }
  * Rules:
- *  - admin  -> assignee must be manager
+ *  - admin  -> assignee can be any user
  *  - manager-> assignee must be sales_rep AND within manager's teams
  * Effect:
  *  - append rows to lead_assignments (no DB schema change)
@@ -89,9 +89,7 @@ const bulkAssign = async (req, res) => {
     if (!assigneeRole) return resError(res, "Assignee not found.", 404);
 
     if (actorRole === "admin") {
-      if (assigneeRole !== "manager") {
-        return resError(res, "Admin can only bulk-assign to managers.", 403);
-      }
+      // No restriction for admin: can bulk-assign to anyone
     } else if (actorRole === "manager") {
       if (assigneeRole !== "sales_rep") {
         return resError(res, "Manager can only bulk-assign to sales reps.", 403);
