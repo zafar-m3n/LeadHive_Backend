@@ -1,7 +1,17 @@
 "use strict";
 
 const { Op, literal, Sequelize } = require("sequelize");
-const { Lead, LeadAssignment, User, Role, Team, TeamMember, TeamManager } = require("../models");
+const {
+  Lead,
+  LeadAssignment,
+  User,
+  Role,
+  Team,
+  TeamMember,
+  TeamManager,
+  LeadSource,
+  LeadStatus,
+} = require("../models");
 const { sequelize } = require("../config/database");
 const { resSuccess, resError } = require("../utils/responseUtil");
 
@@ -75,21 +85,27 @@ async function getLatestAssignmentsMap(leadIds) {
  */
 const bulkAssign = async (req, res) => {
   try {
-    const { lead_ids = [], assignee_id, overwrite = false } = req.body || {};
+    const { lead_ids = [], assignee_id, overwrite = false, status_id } = req.body || {};
     const actorId = req.user?.id;
-    const actorRole = req.user?.role; // you already set req.user.role to "admin"/"manager"/"sales_rep"
+    const actorRole = req.user?.role; // "admin" | "manager" | "sales_rep"
 
     if (!Array.isArray(lead_ids) || !lead_ids.length) {
       return resError(res, "lead_ids[] is required.", 400);
     }
     if (!assignee_id) return resError(res, "assignee_id is required.", 400);
 
+    // Optional: validate status if provided
+    if (status_id !== undefined && status_id !== null) {
+      const status = await LeadStatus.findByPk(status_id);
+      if (!status) return resError(res, "Target status not found.", 404);
+    }
+
     // Validate roles
     const assigneeRole = await getUserRoleValue(assignee_id);
     if (!assigneeRole) return resError(res, "Assignee not found.", 404);
 
     if (actorRole === "admin") {
-      // No restriction for admin: can bulk-assign to anyone
+      // Admin can assign to anyone
     } else if (actorRole === "manager") {
       if (assigneeRole !== "sales_rep") {
         return resError(res, "Manager can only bulk-assign to sales reps.", 403);
@@ -111,18 +127,20 @@ const bulkAssign = async (req, res) => {
     // Latest assignees for found leads
     const latestMap = await getLatestAssignmentsMap([...foundIds]);
 
-    // Build worklist
+    // Build worklist (which leads will actually receive a new assignment row)
     const toCreate = [];
+    const idsToAffect = []; // IDs that will get the new assignment (and thus optional status update)
     const skipped = []; // { id, reason }
+
     for (const id of foundIds) {
       const current = latestMap.get(id) ?? null;
 
-      // If overwrite=false and there is an assignee different from target, skip
+      // If overwrite=false and a different assignee exists, skip
       if (!overwrite && current && current !== assignee_id) {
         skipped.push({ id, reason: "already_assigned" });
         continue;
       }
-      // If current already equals target, we can skip as no-op (or still add history if you want)
+      // If overwrite=false and already assigned to target, skip (no-op)
       if (!overwrite && current === assignee_id) {
         skipped.push({ id, reason: "already_assigned_to_target" });
         continue;
@@ -133,17 +151,29 @@ const bulkAssign = async (req, res) => {
         assignee_id,
         assigned_by: actorId,
       });
+      idsToAffect.push(id);
     }
 
     let created = 0;
+    let statusUpdated = 0;
+
     if (toCreate.length) {
       await sequelize.transaction(async (t) => {
-        // Bulk create in chunks to avoid huge single INSERT, if needed
+        // 1) Insert assignment history rows (chunked)
         const CHUNK = 1000;
         for (let i = 0; i < toCreate.length; i += CHUNK) {
           const slice = toCreate.slice(i, i + CHUNK);
           await LeadAssignment.bulkCreate(slice, { transaction: t });
           created += slice.length;
+        }
+
+        // 2) Optional: update status for exactly those leads we just assigned
+        if (status_id !== undefined && status_id !== null) {
+          const [count] = await Lead.update(
+            { status_id, updated_by: actorId },
+            { where: { id: { [Op.in]: idsToAffect } }, transaction: t }
+          );
+          statusUpdated = count;
         }
       });
     }
@@ -151,10 +181,12 @@ const bulkAssign = async (req, res) => {
     return resSuccess(res, {
       total_requested: lead_ids.length,
       updated: created,
+      status_updated: statusUpdated, // how many had status changed
       skipped,
       missing,
       assignee_id,
       overwrite: !!overwrite,
+      ...(status_id !== undefined ? { status_id } : {}),
     });
   } catch (err) {
     console.error("BulkAssign Error:", err);
@@ -298,10 +330,156 @@ const bulkDeleteLeads = async (req, res) => {
   }
 };
 
+const bulkUpdateStatus = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { lead_ids = [], status_id } = req.body || {};
+    const actorId = req.user?.id;
+
+    if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
+      await t.rollback();
+      return resError(res, "lead_ids[] is required.", 400);
+    }
+    if (!status_id) {
+      await t.rollback();
+      return resError(res, "status_id is required.", 400);
+    }
+
+    // Validate FK target to give a clear message instead of a generic DB error
+    const status = await LeadStatus.findByPk(status_id, { transaction: t });
+    if (!status) {
+      await t.rollback();
+      return resError(res, "Target status not found.", 404);
+    }
+
+    // Load existing leads
+    const leads = await Lead.findAll({
+      where: { id: { [Op.in]: lead_ids } },
+      attributes: ["id", "status_id"],
+      transaction: t,
+    });
+
+    const foundIds = new Set(leads.map((l) => l.id));
+    const missing = lead_ids.filter((id) => !foundIds.has(id));
+
+    // Partition into already_set vs to_update
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const skipped = [];
+    const idsToUpdate = [];
+    for (const id of foundIds) {
+      const rec = byId.get(id);
+      if (Number(rec.status_id) === Number(status_id)) {
+        skipped.push({ id, reason: "already_set" });
+      } else {
+        idsToUpdate.push(id);
+      }
+    }
+
+    // Apply update
+    let updated = 0;
+    if (idsToUpdate.length > 0) {
+      const [count] = await Lead.update(
+        { status_id, updated_by: actorId },
+        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t }
+      );
+      updated = count;
+    }
+
+    await t.commit();
+    return resSuccess(res, {
+      requested: lead_ids.length,
+      updated,
+      missing,
+      skipped,
+      status_id,
+    });
+  } catch (err) {
+    console.error("bulkUpdateStatus Error:", err);
+    try {
+      await t.rollback();
+    } catch {}
+    return resError(res, "Bulk status update failed.", 500);
+  }
+};
+
+const bulkUpdateSource = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { lead_ids = [], source_id } = req.body || {};
+    const actorId = req.user?.id;
+
+    if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
+      await t.rollback();
+      return resError(res, "lead_ids[] is required.", 400);
+    }
+    if (!source_id) {
+      await t.rollback();
+      return resError(res, "source_id is required.", 400);
+    }
+
+    // Validate FK target
+    const source = await LeadSource.findByPk(source_id, { transaction: t });
+    if (!source) {
+      await t.rollback();
+      return resError(res, "Target source not found.", 404);
+    }
+
+    // Load existing leads
+    const leads = await Lead.findAll({
+      where: { id: { [Op.in]: lead_ids } },
+      attributes: ["id", "source_id"],
+      transaction: t,
+    });
+
+    const foundIds = new Set(leads.map((l) => l.id));
+    const missing = lead_ids.filter((id) => !foundIds.has(id));
+
+    // Partition into already_set vs to_update
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const skipped = [];
+    const idsToUpdate = [];
+    for (const id of foundIds) {
+      const rec = byId.get(id);
+      if (Number(rec.source_id) === Number(source_id)) {
+        skipped.push({ id, reason: "already_set" });
+      } else {
+        idsToUpdate.push(id);
+      }
+    }
+
+    // Apply update
+    let updated = 0;
+    if (idsToUpdate.length > 0) {
+      const [count] = await Lead.update(
+        { source_id, updated_by: actorId },
+        { where: { id: { [Op.in]: idsToUpdate } }, transaction: t }
+      );
+      updated = count;
+    }
+
+    await t.commit();
+    return resSuccess(res, {
+      requested: lead_ids.length,
+      updated,
+      missing,
+      skipped,
+      source_id,
+    });
+  } catch (err) {
+    console.error("bulkUpdateSource Error:", err);
+    try {
+      await t.rollback();
+    } catch {}
+    return resError(res, "Bulk source update failed.", 500);
+  }
+};
+
 // --------------------------------------------------------------------------
 
 module.exports = {
   bulkAssign,
   getAssignableTargets,
   bulkDeleteLeads,
+  bulkUpdateStatus,
+  bulkUpdateSource,
 };
