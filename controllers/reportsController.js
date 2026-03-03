@@ -136,8 +136,13 @@ const getMonthlyReports = async (req, res) => {
       return resError(res, "Forbidden for this role", 403);
     }
 
-    // 3) Load master lists we need: statuses (for both sales + performance table)
+    // 3) Load master lists: statuses & sources (for sales + performance table)
     const allStatuses = await LeadStatus.findAll({
+      attributes: ["id", "value", "label"],
+      order: [["id", "ASC"]],
+    });
+
+    const allSources = await LeadSource.findAll({
       attributes: ["id", "value", "label"],
       order: [["id", "ASC"]],
     });
@@ -228,6 +233,9 @@ const getMonthlyReports = async (req, res) => {
     // =========================
     // 7) Calls by Source card
     // =========================
+    //
+    // Now additionally constrained by the lead's *last contacted* date
+    // (Lead.updated_at) being in [start, end].
     let callsBySource = [];
 
     if (agentIds.length) {
@@ -241,6 +249,12 @@ const getMonthlyReports = async (req, res) => {
           {
             model: Lead,
             attributes: [],
+            where: {
+              updated_at: {
+                [Op.gte]: start,
+                [Op.lte]: end,
+              },
+            },
             include: [
               {
                 model: LeadSource,
@@ -264,12 +278,30 @@ const getMonthlyReports = async (req, res) => {
     // =========================
     // 8) Sales from Calls card
     // =========================
+    //
+    // Now requires BOTH:
+    //  - Lead.status = CUSTOMER AND Lead.updated_at in [start, end] (i.e., last contacted this month)
+    //  - Lead has at least one LeadNote (call) this month by an in-scope agent.
     let salesFromCalls = {
       totalCustomers: 0,
       bySource: [],
     };
 
     const conversionsMap = new Map(); // user_id -> conversions_this_month
+
+    // Precompute: which leads had calls this month (for "from calls" requirement)
+    let leadIdsWithCallsThisMonth = new Set();
+    if (agentIds.length) {
+      const leadsWithCallsRows = await LeadNote.findAll({
+        where: notesWhere,
+        attributes: [[fn("DISTINCT", col("lead_id")), "lead_id"]],
+        raw: true,
+      });
+
+      leadIdsWithCallsThisMonth = new Set(
+        leadsWithCallsRows.map((r) => Number(r.lead_id)).filter((id) => !Number.isNaN(id)),
+      );
+    }
 
     if (customerStatus) {
       const salesWhere = {
@@ -290,7 +322,7 @@ const getMonthlyReports = async (req, res) => {
         assignmentWhere.assignee_id = userId;
       }
 
-      const customerLeads = await Lead.findAll({
+      const customerLeadsRaw = await Lead.findAll({
         where: salesWhere,
         attributes: ["id", "source_id"],
         include: [
@@ -307,6 +339,9 @@ const getMonthlyReports = async (req, res) => {
           },
         ],
       });
+
+      // Filter to only those leads that had at least one call (LeadNote) this month
+      const customerLeads = customerLeadsRaw.filter((lead) => leadIdsWithCallsThisMonth.has(lead.id));
 
       const totalCustomers = customerLeads.length;
 
@@ -346,9 +381,10 @@ const getMonthlyReports = async (req, res) => {
     // 9) Monthly Performance table
     // =========================
     //
-    // Now fully month-based:
+    // Month-based:
     //  - status_counts: only leads whose LATEST assignment's assigned_at
     //    falls within [start, end].
+    //  - source_counts: same, but grouped by Lead.source_id.
     //  - callsThisMonth: from LeadNote (already month-filtered above).
     //  - conversionsThisMonth: from salesFromCalls (already month-filtered).
     let monthlyPerformance = {
@@ -356,6 +392,11 @@ const getMonthlyReports = async (req, res) => {
         id: s.id,
         value: s.value,
         label: s.label,
+      })),
+      sources: allSources.map((src) => ({
+        id: src.id,
+        value: src.value,
+        label: src.label,
       })),
       agents: [],
     };
@@ -371,7 +412,6 @@ const getMonthlyReports = async (req, res) => {
         where: {
           id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
           assignee_id: { [Op.in]: agentIds },
-          // THIS is the key fix: restrict latest assignments to this month
           assigned_at: {
             [Op.gte]: start,
             [Op.lte]: end,
@@ -400,16 +440,63 @@ const getMonthlyReports = async (req, res) => {
         inner.set(sid, (inner.get(sid) || 0) + count);
       }
 
-      // 9.2 Build final per-agent rows
+      // 9.2 Source breakdown by agent (ONLY assignments in this month)
+      const sourceRows = await LeadAssignment.findAll({
+        attributes: [
+          "assignee_id",
+          [col("Lead.source_id"), "source_id"],
+          [fn("COUNT", col("LeadAssignment.lead_id")), "lead_count"],
+        ],
+        where: {
+          id: { [Op.in]: LATEST_ASSIGNMENT_IDS },
+          assignee_id: { [Op.in]: agentIds },
+          assigned_at: {
+            [Op.gte]: start,
+            [Op.lte]: end,
+          },
+        },
+        include: [
+          {
+            model: Lead,
+            attributes: [],
+          },
+        ],
+        group: ["assignee_id", "Lead.source_id"],
+        raw: true,
+      });
+
+      const sourceCountsByAgent = new Map(); // agentId -> Map(sourceId -> count)
+      for (const row of sourceRows) {
+        const aid = String(row.assignee_id);
+        const sid = String(row.source_id || 0);
+        const count = Number(row.lead_count || 0);
+
+        if (!sourceCountsByAgent.has(aid)) {
+          sourceCountsByAgent.set(aid, new Map());
+        }
+        const inner = sourceCountsByAgent.get(aid);
+        inner.set(sid, (inner.get(sid) || 0) + count);
+      }
+
+      // 9.3 Build final per-agent rows
       const agentsPerf = agentUsers.map((user) => {
         const aid = user.id;
+
         const statusMap = statusCountsByAgent.get(String(aid)) || new Map();
+        const sourceMap = sourceCountsByAgent.get(String(aid)) || new Map();
 
         const statusCounts = allStatuses.map((s) => ({
           status_id: s.id,
           status_value: s.value,
           status_label: s.label,
           count: statusMap.get(String(s.id)) || 0,
+        }));
+
+        const sourceCounts = allSources.map((src) => ({
+          source_id: src.id,
+          source_value: src.value,
+          source_label: src.label,
+          count: sourceMap.get(String(src.id)) || 0,
         }));
 
         const callsThisMonth = callCountsMap.get(aid) || 0;
@@ -423,11 +510,13 @@ const getMonthlyReports = async (req, res) => {
           calls_this_month: callsThisMonth,
           conversion_rate: conversionRate,
           status_counts: statusCounts,
+          source_counts: sourceCounts,
         };
       });
 
       monthlyPerformance = {
         statuses: monthlyPerformance.statuses,
+        sources: monthlyPerformance.sources,
         agents: agentsPerf.sort(
           (a, b) => b.calls_this_month - a.calls_this_month || a.full_name.localeCompare(b.full_name),
         ),
