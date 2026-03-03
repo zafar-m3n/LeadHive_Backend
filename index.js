@@ -23,7 +23,7 @@ app.use(
     origin: [process.env.NODE_LEADHIVE_FRONTEND_URL, "http://localhost:5173"],
     credentials: true,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-  })
+  }),
 );
 
 // ✅ Serve static uploads folder
@@ -41,6 +41,7 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 const bulkLeadsRoutes = require("./routes/bulkLeadsRoutes");
 const sourceStatusRoutes = require("./routes/sourceStatusRoutes");
 const leadsExportRoutes = require("./routes/leadsExportRoutes");
+const reportsRoutes = require("./routes/reportsRoutes");
 
 // ✅ Use Routes
 app.use("/api/v1/auth", authRoutes);
@@ -54,6 +55,7 @@ app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1/bulk", bulkLeadsRoutes);
 app.use("/api/v1/lead", sourceStatusRoutes);
 app.use("/api/v1/leads/export", leadsExportRoutes);
+app.use("/api/v1/reports", reportsRoutes);
 
 // ✅ Root Route
 app.get("/", (req, res) => {
